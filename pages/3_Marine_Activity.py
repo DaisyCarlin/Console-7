@@ -783,9 +783,7 @@ st.markdown(
         <div class="hero-kicker">LIVE MARITIME SURVEILLANCE</div>
         <h1 class="hero-title">Abnormal Marine Activity</h1>
         <p class="hero-copy">
-            A polished regional watchboard for commercial vessel traffic, abnormal movement signals,
-            and tanker or energy shipping relevance using public AIS position snapshots.
-        </p>
+            
     </div>
     """,
     unsafe_allow_html=True,
