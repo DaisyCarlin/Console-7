@@ -16,6 +16,10 @@ OPENSKY_STATES_URL = "https://opensky-network.org/api/states/all"
 REQUEST_HEADERS = {"User-Agent": "SkyScopeRadar/1.0"}
 TRAIL_RETENTION_SECONDS = 30 * 60
 TRAIL_STORE_LIMIT = 14
+DEFAULT_MAP_RENDER_LIMIT = 350
+MAX_MAP_RENDER_LIMIT = 900
+TRAIL_AUTO_LIMIT = 260
+VECTOR_AUTO_LIMIT = 380
 
 WATCHED_COUNTRIES = {
     "united states": "Watched state traffic",
@@ -254,6 +258,10 @@ def safe_str(value):
     if value is None:
         return ""
     return str(value).strip()
+
+
+def normalize_flight_key(value):
+    return safe_str(value).lower()
 
 
 def normalize_squawk(value):
@@ -518,7 +526,7 @@ def render_metric_card(title, value, detail, accent):
     )
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=45, show_spinner=False)
 def load_flights():
     response = requests.get(OPENSKY_STATES_URL, headers=REQUEST_HEADERS, timeout=20)
     response.raise_for_status()
@@ -576,21 +584,14 @@ def load_flights():
     df["altitude_ft"] = df["baro_altitude"].apply(meters_to_feet)
     df["speed_kt"] = df["velocity"].apply(mps_to_knots)
     df["vertical_rate_fpm"] = df["vertical_rate"].apply(mps_to_fpm)
+    df["icao_key"] = df["icao24"].apply(normalize_flight_key)
     df["alert_sort"] = df["alert_category"].map(ALERT_PRIORITY).fillna(99)
     df = df.sort_values(["alert_sort", "last_contact"], ascending=[True, False]).reset_index(drop=True)
 
     return df
 
 
-def filter_flights(
-    df,
-    traffic_focus,
-    airborne_only,
-    selected_squawks,
-    country_query,
-    callsign_query,
-    altitude_range,
-):
+def filter_base_flights(df, airborne_only, selected_squawks, altitude_range, flight_search):
     filtered = df.copy()
     if filtered.empty:
         return filtered
@@ -598,57 +599,127 @@ def filter_flights(
     if airborne_only:
         filtered = filtered[filtered["on_ground"] == False]
 
-    if country_query:
-        filtered = filtered[
-            filtered["origin_country"].fillna("").str.lower().str.contains(country_query, na=False)
-        ]
-
-    if callsign_query:
-        filtered = filtered[
-            filtered["callsign"].fillna("").str.lower().str.contains(callsign_query, na=False)
-        ]
-
     low_altitude, high_altitude = altitude_range
     filtered = filtered[
         filtered["altitude_ft"].fillna(0).between(float(low_altitude), float(high_altitude))
     ]
 
-    if traffic_focus == "Emergencies only":
-        filtered = filtered[filtered["is_emergency"]]
-    elif traffic_focus == "Military only":
-        filtered = filtered[filtered["is_military"]]
-    elif traffic_focus == "State-linked only":
-        filtered = filtered[filtered["is_state_watch"]]
-    elif traffic_focus == "Priority traffic":
-        filtered = filtered[
-            filtered["is_emergency"] | filtered["is_military"] | filtered["is_state_watch"]
-        ]
-
     if not selected_squawks:
-        if traffic_focus == "Emergencies only":
-            filtered = filtered.iloc[0:0]
-        else:
-            filtered = filtered[~filtered["is_emergency"]]
+        filtered = filtered[~filtered["is_emergency"]]
     elif len(selected_squawks) < len(SQUAWK_MEANINGS):
-        if traffic_focus == "Emergencies only":
-            filtered = filtered[filtered["squawk"].isin(selected_squawks)]
-        else:
-            filtered = filtered[(~filtered["is_emergency"]) | (filtered["squawk"].isin(selected_squawks))]
+        filtered = filtered[(~filtered["is_emergency"]) | (filtered["squawk"].isin(selected_squawks))]
+
+    if flight_search:
+        search_text = flight_search.lower()
+        filtered = filtered[
+            filtered["callsign"].fillna("").str.lower().str.contains(search_text, na=False)
+            | filtered["icao_key"].fillna("").str.contains(search_text, na=False)
+            | filtered["origin_country"].fillna("").str.lower().str.contains(search_text, na=False)
+            | filtered["squawk"].fillna("").str.lower().str.contains(search_text, na=False)
+            | filtered["squawk_label"].fillna("").str.lower().str.contains(search_text, na=False)
+        ]
 
     return filtered.reset_index(drop=True)
 
 
-def create_map(df, map_theme, show_trails, show_heading_vectors, show_labels, trail_points):
+def filter_map_categories(df, visible_categories):
+    if df.empty:
+        return df
+    if not visible_categories:
+        return df.iloc[0:0].copy()
+    return df[df["alert_category"].isin(visible_categories)].reset_index(drop=True)
+
+
+def get_flight_by_key(df, icao_key):
+    if df.empty or not icao_key:
+        return pd.DataFrame()
+    return df[df["icao_key"] == normalize_flight_key(icao_key)].head(1).copy()
+
+
+def prepare_map_dataframe(df, flights_df, visible_categories, map_render_limit, selected_flight_key):
+    map_df = filter_map_categories(df, visible_categories)
+    total_matches = len(map_df)
+
+    if map_render_limit and len(map_df) > map_render_limit:
+        map_df = map_df.head(map_render_limit).copy()
+
+    selected_row = get_flight_by_key(flights_df, selected_flight_key)
+    if not selected_row.empty:
+        selected_key = selected_row.iloc[0]["icao_key"]
+        if map_df.empty or selected_key not in map_df["icao_key"].tolist():
+            map_df = pd.concat([selected_row, map_df], ignore_index=True)
+            map_df = map_df.drop_duplicates(subset=["icao_key"], keep="first").reset_index(drop=True)
+
+    return map_df, total_matches, selected_row
+
+
+def extract_selected_rows(widget_state):
+    if not widget_state:
+        return []
+
+    selection = None
+    if isinstance(widget_state, dict):
+        selection = widget_state.get("selection")
+    else:
+        selection = getattr(widget_state, "selection", None)
+
+    if not selection:
+        return []
+
+    if isinstance(selection, dict):
+        return selection.get("rows", []) or []
+
+    return getattr(selection, "rows", []) or []
+
+
+def sync_selected_flight_from_rows(selection_rows, source_df):
+    if source_df.empty:
+        return False
+
+    if not selection_rows:
+        return False
+
+    selected_index = selection_rows[0]
+    if selected_index >= len(source_df):
+        return False
+
+    selected_key = normalize_flight_key(source_df.iloc[selected_index]["icao24"])
+    if not selected_key:
+        return False
+
+    if st.session_state.get("focused_flight_key") != selected_key:
+        st.session_state["focused_flight_key"] = selected_key
+        return True
+
+    return False
+
+
+def create_map(
+    df,
+    map_theme,
+    show_trails,
+    show_heading_vectors,
+    show_labels,
+    trail_points,
+    selected_flight_key,
+):
     coords_df = df.dropna(subset=["latitude", "longitude"]).copy()
     if coords_df.empty:
         return None, False
 
-    center_lat = coords_df["latitude"].mean()
-    center_lon = coords_df["longitude"].mean()
+    selected_coords = coords_df[coords_df["icao_key"] == normalize_flight_key(selected_flight_key)].head(1)
+    if not selected_coords.empty:
+        center_lat = float(selected_coords.iloc[0]["latitude"])
+        center_lon = float(selected_coords.iloc[0]["longitude"])
+        zoom_start = 6
+    else:
+        center_lat = coords_df["latitude"].mean()
+        center_lon = coords_df["longitude"].mean()
+        zoom_start = 4
 
     flight_map = folium.Map(
         location=[center_lat, center_lon],
-        zoom_start=4,
+        zoom_start=zoom_start,
         control_scale=True,
         prefer_canvas=True,
         tiles=None,
@@ -672,8 +743,11 @@ def create_map(df, map_theme, show_trails, show_heading_vectors, show_labels, tr
         prefix="Lat / Lon",
     ).add_to(flight_map)
 
-    trail_layer = folium.FeatureGroup(name="Session trails", show=show_trails)
-    vector_layer = folium.FeatureGroup(name="Heading vectors", show=show_heading_vectors)
+    effective_trails = show_trails and len(coords_df) <= TRAIL_AUTO_LIMIT
+    effective_vectors = show_heading_vectors and len(coords_df) <= VECTOR_AUTO_LIMIT
+
+    trail_layer = folium.FeatureGroup(name="Session trails", show=effective_trails)
+    vector_layer = folium.FeatureGroup(name="Heading vectors", show=effective_vectors)
     marker_layer = folium.FeatureGroup(name="Aircraft", show=True)
 
     label_budget = 220
@@ -684,7 +758,9 @@ def create_map(df, map_theme, show_trails, show_heading_vectors, show_labels, tr
         lat = row["latitude"]
         lon = row["longitude"]
 
-        if show_trails:
+        is_selected = row["icao_key"] == normalize_flight_key(selected_flight_key)
+
+        if effective_trails:
             trail = get_trail_points(row["icao24"], trail_points)
             if len(trail) > 1:
                 folium.PolyLine(
@@ -700,7 +776,7 @@ def create_map(df, map_theme, show_trails, show_heading_vectors, show_labels, tr
                     opacity=0.78,
                 ).add_to(trail_layer)
 
-        if show_heading_vectors and row["on_ground"] == False:
+        if effective_vectors and row["on_ground"] == False:
             velocity = row.get("velocity")
             distance_km = 40.0
             if pd.notna(velocity):
@@ -721,8 +797,26 @@ def create_map(df, map_theme, show_trails, show_heading_vectors, show_labels, tr
             location=[lat, lon],
             tooltip=tooltip,
             popup=folium.Popup(build_popup_html(row), max_width=360),
-            icon=DivIcon(html=build_plane_icon_html(row, effective_labels)),
+            icon=DivIcon(html=build_plane_icon_html(row, effective_labels or is_selected)),
         ).add_to(marker_layer)
+
+        if is_selected:
+            folium.CircleMarker(
+                location=[lat, lon],
+                radius=18,
+                color="#ffffff",
+                weight=2,
+                fill=False,
+                opacity=0.95,
+            ).add_to(marker_layer)
+            folium.CircleMarker(
+                location=[lat, lon],
+                radius=24,
+                color=color,
+                weight=2,
+                fill=False,
+                opacity=0.45,
+            ).add_to(marker_layer)
 
     trail_layer.add_to(flight_map)
     vector_layer.add_to(flight_map)
@@ -857,6 +951,27 @@ def make_feed_table(df):
     return table
 
 
+def render_selectable_flight_table(source_df, display_df, widget_key):
+    if source_df.empty or display_df.empty:
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        return
+
+    normalized_source = source_df.reset_index(drop=True).copy()
+    normalized_display = display_df.reset_index(drop=True).copy()
+
+    event = st.dataframe(
+        normalized_display,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=widget_key,
+    )
+
+    if sync_selected_flight_from_rows(extract_selected_rows(event), normalized_source):
+        st.rerun()
+
+
 inject_styles()
 
 st.markdown(
@@ -890,17 +1005,11 @@ with st.sidebar:
         load_flights.clear()
         st.rerun()
 
-    traffic_focus = st.selectbox(
-        "Traffic focus",
-        [
-            "All traffic",
-            "Priority traffic",
-            "Emergencies only",
-            "Military only",
-            "State-linked only",
-        ],
-        index=1,
+    flight_search = st.text_input(
+        "Search flights",
+        placeholder="Callsign, ICAO, country, or squawk",
     )
+
     airborne_only = st.toggle("Airborne only", value=True)
 
     selected_squawks = st.multiselect(
@@ -909,9 +1018,6 @@ with st.sidebar:
         default=list(SQUAWK_MEANINGS.keys()),
         format_func=lambda code: f"{code} - {SQUAWK_MEANINGS[code]['label']}",
     )
-
-    country_query = st.text_input("Country contains", value="").strip().lower()
-    callsign_query = st.text_input("Callsign contains", value="").strip().lower()
 
     if not flights_df.empty and flights_df["altitude_ft"].notna().any():
         max_altitude = int(
@@ -931,6 +1037,20 @@ with st.sidebar:
         step=1000,
     )
 
+    st.markdown("### Map Filters")
+    visible_categories = st.multiselect(
+        "Show on map",
+        options=["Emergency", "Military", "State-linked", "Civilian"],
+        default=["Emergency", "Military", "State-linked", "Civilian"],
+    )
+    map_render_limit = st.slider(
+        "Map flight limit",
+        min_value=100,
+        max_value=MAX_MAP_RENDER_LIMIT,
+        value=DEFAULT_MAP_RENDER_LIMIT,
+        step=50,
+    )
+
     st.markdown("### Map Layers")
     map_theme = st.selectbox("Map theme", options=list(MAP_THEMES.keys()), index=1)
     show_trails = st.toggle("Show session trails", value=True)
@@ -938,28 +1058,52 @@ with st.sidebar:
     show_heading_vectors = st.toggle("Show heading vectors", value=True)
     show_labels = st.toggle("Show callsign labels", value=False)
 
+    if st.session_state.get("focused_flight_key"):
+        if st.button("Clear selected flight", use_container_width=True):
+            st.session_state["focused_flight_key"] = ""
+            st.rerun()
+
 if data_error:
     filtered_df = pd.DataFrame()
+    feed_df = pd.DataFrame()
+    map_df = pd.DataFrame()
+    selected_flight_row = pd.DataFrame()
+    total_map_matches = 0
 else:
-    filtered_df = filter_flights(
+    filtered_df = filter_base_flights(
         flights_df,
-        traffic_focus=traffic_focus,
         airborne_only=airborne_only,
         selected_squawks=selected_squawks,
-        country_query=country_query,
-        callsign_query=callsign_query,
         altitude_range=altitude_range,
+        flight_search=flight_search.strip().lower(),
+    )
+    feed_df = filter_map_categories(filtered_df, visible_categories)
+    map_df, total_map_matches, selected_flight_row = prepare_map_dataframe(
+        filtered_df,
+        flights_df,
+        visible_categories=visible_categories,
+        map_render_limit=map_render_limit,
+        selected_flight_key=st.session_state.get("focused_flight_key", ""),
     )
 
-emergency_df = flights_df[flights_df["is_emergency"]].copy() if not flights_df.empty else pd.DataFrame()
-military_df = flights_df[flights_df["is_military"]].copy() if not flights_df.empty else pd.DataFrame()
-state_watch_df = flights_df[flights_df["is_state_watch"]].copy() if not flights_df.empty else pd.DataFrame()
+emergency_df = filtered_df[filtered_df["is_emergency"]].copy() if not filtered_df.empty else pd.DataFrame()
+military_df = filtered_df[filtered_df["is_military"]].copy() if not filtered_df.empty else pd.DataFrame()
+state_watch_df = filtered_df[filtered_df["is_state_watch"]].copy() if not filtered_df.empty else pd.DataFrame()
 
 metric_columns = st.columns(4)
+visible_map_detail = f"{total_map_matches:,} match the current map filters"
+if len(map_df) > total_map_matches:
+    visible_map_detail += " plus 1 selected flight"
+
 with metric_columns[0]:
     render_metric_card("Flights in feed", f"{len(flights_df):,}", "OpenSky live state records loaded", "#38bdf8")
 with metric_columns[1]:
-    render_metric_card("Visible on map", f"{len(filtered_df):,}", f"Current focus: {traffic_focus}", "#7dd3fc")
+    render_metric_card(
+        "Visible on map",
+        f"{len(map_df):,}",
+        visible_map_detail,
+        "#7dd3fc",
+    )
 with metric_columns[2]:
     render_metric_card("Emergency squawks", f"{len(emergency_df):,}", "Decoded special squawks with reasons", "#ff5f6d")
 with metric_columns[3]:
@@ -989,42 +1133,55 @@ with map_col:
 
     if data_error:
         st.error(f"Flight data unavailable: {data_error}")
-    elif filtered_df.empty:
+    elif map_df.empty:
         st.info("No flights match the active filters.")
     else:
         flight_map, labels_used = create_map(
-            filtered_df,
+            map_df,
             map_theme=map_theme,
             show_trails=show_trails,
             show_heading_vectors=show_heading_vectors,
             show_labels=show_labels,
             trail_points=trail_points,
+            selected_flight_key=st.session_state.get("focused_flight_key", ""),
         )
 
         if flight_map is None:
             st.info("No coordinate data is available for the filtered flights.")
         else:
             st_folium(flight_map, use_container_width=True, height=720)
+            if total_map_matches > len(map_df):
+                st.caption(
+                    f"Showing {len(map_df):,} of {total_map_matches:,} matching flights on the map for faster loading."
+                )
             if show_labels and not labels_used:
                 st.caption("Callsign labels were automatically reduced because the map has too many aircraft for clear labels.")
 
 with side_col:
-    st.markdown(
-        """
-        <div class="panel-card">
-            <div class="panel-title">Radar Notes</div>
-            <div class="panel-copy">
-                Session trails are built from repeated OpenSky refreshes in this browser session.
-                They are clearer than simple heading lines, but they are not full historical routes.
+    st.markdown("#### Selected flight")
+    if selected_flight_row.empty:
+        st.info("Click a flight in one of the tables below to focus it on the map.")
+    else:
+        selected_record = selected_flight_row.iloc[0]
+        st.markdown(
+            f"""
+            <div class="panel-card">
+                <div class="panel-title">{html.escape(safe_str(selected_record.get("callsign") or selected_record.get("icao24") or "Unknown"))}</div>
+                <div class="panel-copy">
+                    {html.escape(safe_str(selected_record.get("origin_country") or "Unknown"))}<br>
+                    {html.escape(safe_str(selected_record.get("alert_category") or "Civilian"))}<br>
+                    Squawk: {html.escape(safe_str(selected_record.get("squawk") or "None"))}<br>
+                    Altitude: {format_altitude(selected_record.get("baro_altitude"))}<br>
+                    Speed: {format_speed(selected_record.get("velocity"))}
+                </div>
             </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+            """,
+            unsafe_allow_html=True,
+        )
 
-    if {"is_emergency", "is_military", "is_state_watch"}.issubset(filtered_df.columns):
-        active_alerts = filtered_df[
-            filtered_df["is_emergency"] | filtered_df["is_military"] | filtered_df["is_state_watch"]
+    if {"is_emergency", "is_military", "is_state_watch"}.issubset(feed_df.columns):
+        active_alerts = feed_df[
+            feed_df["is_emergency"] | feed_df["is_military"] | feed_df["is_state_watch"]
         ].copy()
     else:
         active_alerts = pd.DataFrame()
@@ -1073,7 +1230,11 @@ with tab_emergency:
     elif emergency_df.empty:
         st.success("No emergency squawk flights are currently visible in the feed.")
     else:
-        st.dataframe(make_emergency_table(emergency_df), use_container_width=True, hide_index=True)
+        render_selectable_flight_table(
+            emergency_df,
+            make_emergency_table(emergency_df),
+            "emergency_table",
+        )
 
 with tab_military:
     st.markdown("### Military Filter")
@@ -1083,18 +1244,25 @@ with tab_military:
     elif military_df.empty:
         st.info("No flights matched the current military callsign heuristic rules.")
     else:
-        st.dataframe(make_military_table(military_df), use_container_width=True, hide_index=True)
-        st.caption("If you want stricter or broader military matching, add or remove prefixes in `MILITARY_CALLSIGN_RULES` near the top of the file.")
+        render_selectable_flight_table(
+            military_df,
+            make_military_table(military_df),
+            "military_table",
+        )
 
 with tab_feed:
     st.markdown("### Filtered Feed")
-    st.caption("This table follows the sidebar filters so you can inspect exactly what the map is showing.")
+    st.caption("This table follows the sidebar search and map filters so you can inspect exactly what the map is showing.")
     if data_error:
         st.error(f"Flight feed unavailable: {data_error}")
-    elif filtered_df.empty:
+    elif feed_df.empty:
         st.info("No flights match the current filters.")
     else:
-        st.dataframe(make_feed_table(filtered_df), use_container_width=True, hide_index=True)
+        render_selectable_flight_table(
+            feed_df,
+            make_feed_table(feed_df),
+            "feed_table",
+        )
 
 st.markdown("---")
 st.caption(
