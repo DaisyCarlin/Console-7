@@ -978,9 +978,7 @@ st.markdown(
         <div class="hero-kicker">LIVE AIRSPACE SURVEILLANCE</div>
         <h1 class="hero-title">SkyScope Radar</h1>
         <p class="hero-copy">
-            A focused flight-radar-style dashboard for decoded emergency squawks and military or government traffic,
-            with motion trails that build during the live session.
-        </p>
+            
     </div>
     """,
     unsafe_allow_html=True,
