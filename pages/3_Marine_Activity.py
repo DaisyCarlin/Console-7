@@ -959,7 +959,7 @@ st.markdown("")
 
 
 st.markdown("### Region Controls")
-    selected_region = st.selectbox(
+selected_region = st.selectbox(
         "Continent",
         list(CONTINENT_BOXES.keys()),
         key="marine_region_picker",
