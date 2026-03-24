@@ -10,12 +10,30 @@ from websocket import create_connection, WebSocketTimeoutException
 st.set_page_config(page_title="Abnormal Marine Activity", layout="wide")
 
 st.title("Abnormal Marine Activity")
-st.caption("Open-source monitoring for high-interest commercial vessel behavior, tanker traffic, and chokepoint activity.")
+st.caption("Open-source monitoring for commercial vessel traffic and abnormal shipping behaviour by region.")
+
+AISSTREAM_WS_URL = "wss://stream.aisstream.io/v0/stream"
 
 # =========================================================
-# CONFIG
+# CONTINENT REGIONS
 # =========================================================
-AISSTREAM_WS_URL = "wss://stream.aisstream.io/v0/stream"
+CONTINENT_BOXES = {
+    "North America": [[[7.0, -170.0], [72.0, -50.0]]],
+    "South America": [[[-57.0, -92.0], [15.0, -30.0]]],
+    "Europe": [[[34.0, -25.0], [72.0, 45.0]]],
+    "Africa": [[[-35.0, -20.0], [38.0, 55.0]]],
+    "Asia": [[[0.0, 25.0], [78.0, 180.0]]],
+    "Oceania": [[[-50.0, 110.0], [5.0, 180.0]]],
+}
+
+CONTINENT_CENTERS = {
+    "North America": {"lat": 38.0, "lon": -98.0, "zoom": 3},
+    "South America": {"lat": -15.0, "lon": -60.0, "zoom": 3},
+    "Europe": {"lat": 52.0, "lon": 12.0, "zoom": 4},
+    "Africa": {"lat": 4.0, "lon": 20.0, "zoom": 3},
+    "Asia": {"lat": 30.0, "lon": 95.0, "zoom": 3},
+    "Oceania": {"lat": -24.0, "lon": 135.0, "zoom": 4},
+}
 
 TANKER_KEYWORDS = [
     "tanker",
@@ -32,24 +50,6 @@ ABNORMAL_STATUS_KEYWORDS = [
     "constrained by her draught",
     "aground",
 ]
-
-REGION_BOXES = {
-    "Suez": [[[29.0, 31.0], [31.8, 33.5]]],
-    "Hormuz": [[[25.0, 55.0], [27.5, 58.5]]],
-    "Bab el-Mandeb": [[[11.0, 42.0], [14.5, 45.5]]],
-    "Malacca": [[[0.5, 96.0], [6.5, 104.5]]],
-    "Panama": [[[7.0, -81.5], [10.5, -78.0]]],
-    "Bosporus": [[[40.8, 28.8], [41.5, 29.5]]],
-}
-
-REGION_CENTERS = {
-    "Suez": {"lat": 30.4, "lon": 32.2, "zoom": 7},
-    "Hormuz": {"lat": 26.2, "lon": 56.8, "zoom": 7},
-    "Bab el-Mandeb": {"lat": 12.7, "lon": 43.7, "zoom": 7},
-    "Malacca": {"lat": 3.0, "lon": 100.5, "zoom": 6},
-    "Panama": {"lat": 8.8, "lon": -79.8, "zoom": 7},
-    "Bosporus": {"lat": 41.15, "lon": 29.1, "zoom": 10},
-}
 
 DEMO_VESSELS = [
     {
@@ -108,6 +108,34 @@ DEMO_VESSELS = [
         "status": "Restricted manoeuverability",
         "last_update": "2026-03-24T12:03:00Z",
     },
+    {
+        "name": "STRAIT RUNNER",
+        "mmsi": "525004321",
+        "imo": "9678901",
+        "flag": "Indonesia",
+        "ship_type": "LNG Tanker",
+        "lat": -6.2,
+        "lon": 106.8,
+        "speed": 13.1,
+        "course": 140,
+        "destination": "JAPAN",
+        "status": "Under way using engine",
+        "last_update": "2026-03-24T12:04:00Z",
+    },
+    {
+        "name": "TIME TRAVELER",
+        "mmsi": "368163240",
+        "imo": "",
+        "flag": "",
+        "ship_type": "",
+        "lat": 40.7,
+        "lon": -74.0,
+        "speed": 25.6,
+        "course": 193.0,
+        "destination": "",
+        "status": "0",
+        "last_update": "2026-03-24T12:12:54Z",
+    },
 ]
 
 # =========================================================
@@ -124,7 +152,7 @@ def safe_str(value):
         return ""
     return str(value).strip()
 
-def heading_endpoint(lat, lon, bearing_deg, distance_deg=0.8):
+def heading_endpoint(lat, lon, bearing_deg, distance_deg=0.5):
     if pd.isna(lat) or pd.isna(lon) or pd.isna(bearing_deg):
         return None, None
     radians = math.radians(float(bearing_deg))
@@ -150,14 +178,14 @@ def is_high_speed(row):
 
 def abnormal_reason(row):
     reasons = []
-    if row.get("is_tanker"):
-        reasons.append("tanker / energy shipping")
     if row.get("is_high_speed"):
         reasons.append("unusually high speed")
     if row.get("is_abnormal_status"):
         reasons.append("abnormal navigational status")
     if row.get("is_missing_destination"):
         reasons.append("missing destination")
+    if row.get("is_tanker"):
+        reasons.append("energy/tanker relevance")
     return ", ".join(reasons) if reasons else "none"
 
 def marker_color(row):
@@ -201,7 +229,7 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
 # =========================================================
 # AIS LOADER
 # =========================================================
-def fetch_ais_region(region_name: str, max_messages: int = 25, recv_timeout: int = 8):
+def fetch_ais_region(region_name: str, max_messages: int = 30, recv_timeout: int = 8):
     aisstream_key = get_secret("aisstream_key")
 
     if not aisstream_key:
@@ -215,7 +243,7 @@ def fetch_ais_region(region_name: str, max_messages: int = 25, recv_timeout: int
 
         subscribe_message = {
             "APIKey": aisstream_key,
-            "BoundingBoxes": REGION_BOXES[region_name],
+            "BoundingBoxes": CONTINENT_BOXES[region_name],
             "FilterMessageTypes": ["PositionReport"],
         }
 
@@ -243,7 +271,6 @@ def fetch_ais_region(region_name: str, max_messages: int = 25, recv_timeout: int
             lat = report.get("Latitude")
             lon = report.get("Longitude")
 
-            # avoid duplicates
             dedupe_key = (mmsi, lat, lon)
             if dedupe_key in seen:
                 continue
@@ -297,20 +324,20 @@ if "marine_region" not in st.session_state:
     st.session_state.marine_region = None
 
 # =========================================================
-# CONTROLS
+# LOAD CONTROLS
 # =========================================================
 st.subheader("Load a Region")
 
 c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
 
 with c1:
-    selected_region = st.selectbox("Region", list(REGION_BOXES.keys()), index=1)
+    selected_region = st.selectbox("Continent", list(CONTINENT_BOXES.keys()), index=2)
 
 with c2:
-    map_show_tankers_only = st.checkbox("Map: tankers only", value=False)
+    map_show_abnormal_only = st.checkbox("Map: abnormal only", value=False)
 
 with c3:
-    map_show_abnormal_only = st.checkbox("Map: abnormal only", value=True)
+    map_show_tankers_only = st.checkbox("Map: tankers only", value=False)
 
 with c4:
     show_heading_lines = st.checkbox("Show direction lines", value=True)
@@ -334,19 +361,19 @@ data_error = st.session_state.marine_error
 loaded_region = st.session_state.marine_region
 
 if vessels_df.empty:
-    st.info("Pick a region and click 'Load selected region' to fetch marine data.")
+    st.info("Choose a continent and click 'Load selected region' to fetch marine data.")
     st.stop()
 
 map_df = vessels_df.copy()
 
-if map_show_tankers_only:
-    map_df = map_df[map_df["is_tanker"] == True]
-
 if map_show_abnormal_only:
     map_df = map_df[map_df["is_abnormal"] == True]
 
-tanker_df = vessels_df[vessels_df["is_tanker"] == True].copy()
+if map_show_tankers_only:
+    map_df = map_df[map_df["is_tanker"] == True]
+
 abnormal_df = vessels_df[vessels_df["is_abnormal"] == True].copy()
+tanker_df = vessels_df[vessels_df["is_tanker"] == True].copy()
 
 # =========================================================
 # STATUS
@@ -356,16 +383,16 @@ st.subheader("System Status")
 s1, s2, s3, s4, s5 = st.columns(5)
 
 with s1:
-    st.metric("Loaded region", loaded_region if loaded_region else "None")
+    st.metric("Loaded continent", loaded_region if loaded_region else "None")
 
 with s2:
     st.metric("Vessels loaded", len(vessels_df))
 
 with s3:
-    st.metric("Tankers", len(tanker_df))
+    st.metric("Abnormal vessels", len(abnormal_df))
 
 with s4:
-    st.metric("Abnormal vessels", len(abnormal_df))
+    st.metric("Tankers", len(tanker_df))
 
 with s5:
     if data_source == "live":
@@ -414,7 +441,7 @@ with left:
         if coords_df.empty:
             st.info("No coordinates available for the current map filters.")
         else:
-            center = REGION_CENTERS[loaded_region]
+            center = CONTINENT_CENTERS[loaded_region]
             vessel_map = folium.Map(
                 location=[center["lat"], center["lon"]],
                 zoom_start=center["zoom"],
@@ -452,12 +479,12 @@ with left:
 with right:
     st.subheader("Map Legend")
     st.markdown("""
-- 🔴 **Red** = abnormal vessel
-- 🟠 **Orange** = tanker
-- 🟢 **Green** = other visible vessel
+- 🔴 **Red** = abnormal vessel  
+- 🟠 **Orange** = tanker  
+- 🟢 **Green** = other visible vessel  
 """)
     st.caption("Direction lines show approximate current heading only.")
-    st.info("This page only loads data for the region you clicked, which keeps it much faster.")
+    st.info("The page only loads the continent you click, which keeps it faster.")
 
 st.divider()
 
@@ -523,8 +550,8 @@ source_text = "live AIS snapshot" if data_source == "live" else "demo fallback"
 
 st.markdown(f"""
 - **{len(vessels_df)}** vessel records were loaded from the **{source_text}**.
-- **{len(tanker_df)}** vessels are currently categorized as tankers.
 - **{len(abnormal_df)}** vessels are currently flagged for abnormal commercial activity.
-- The page only loads **the region you selected**, which keeps it faster and more reliable.
+- **{len(tanker_df)}** vessels are currently categorized as tankers.
+- The page only loads **the continent you selected**, which keeps it faster and more reliable.
 - Abnormal flags are based on **public movement and status signals**, not proof of wrongdoing.
 """)
