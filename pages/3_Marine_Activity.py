@@ -56,6 +56,15 @@ CONTINENT_CENTERS = {
     "Oceania": {"lat": -24.0, "lon": 135.0, "zoom": 4},
 }
 
+REGION_BRIEFS = {
+    "North America": "Atlantic, Caribbean, Gulf, and Pacific approaches.",
+    "South America": "Atlantic coast, Pacific coast, and southern trade lanes.",
+    "Europe": "North Sea, Baltic, Mediterranean, and Atlantic gateways.",
+    "Africa": "Mediterranean south rim, Gulf of Guinea, and Red Sea approaches.",
+    "Asia": "Arabian Sea to Western Pacific trade corridors.",
+    "Oceania": "Australian waters, Coral Sea, and South Pacific routes.",
+}
+
 TANKER_KEYWORDS = [
     "tanker",
     "oil",
@@ -297,6 +306,60 @@ def inject_styles():
                 border-radius: 18px;
                 overflow: hidden;
                 border: 1px solid var(--stroke);
+            }
+
+            .region-card {
+                border: 1px solid var(--stroke);
+                background: linear-gradient(180deg, rgba(10, 23, 37, 0.92), rgba(14, 31, 49, 0.84));
+                border-radius: 20px;
+                padding: 1rem 1rem 0.9rem 1rem;
+                box-shadow: 0 12px 28px rgba(4, 9, 18, 0.22);
+                min-height: 162px;
+                margin-bottom: 0.65rem;
+            }
+
+            .region-card-active {
+                border-color: rgba(132, 215, 255, 0.45);
+                box-shadow: 0 16px 34px rgba(56, 189, 248, 0.14);
+            }
+
+            .region-chip {
+                display: inline-block;
+                padding: 0.24rem 0.6rem;
+                border-radius: 999px;
+                font-size: 0.72rem;
+                font-weight: 700;
+                letter-spacing: 0.03rem;
+                margin-bottom: 0.75rem;
+                color: #f4fbff;
+            }
+
+            .region-name {
+                font-size: 1.05rem;
+                font-weight: 700;
+                color: var(--text-main);
+                margin-bottom: 0.28rem;
+            }
+
+            .region-copy {
+                font-size: 0.9rem;
+                color: var(--text-soft);
+                line-height: 1.45;
+            }
+
+            div[data-testid="stButton"] > button {
+                min-height: 2.7rem;
+                border-radius: 14px;
+                border: 1px solid var(--stroke);
+                background: linear-gradient(180deg, rgba(15, 31, 49, 0.9), rgba(11, 23, 36, 0.92));
+                color: var(--text-main);
+                font-weight: 700;
+                box-shadow: 0 10px 24px rgba(4, 9, 18, 0.18);
+            }
+
+            div[data-testid="stButton"] > button:hover {
+                border-color: rgba(132, 215, 255, 0.45);
+                color: #ffffff;
             }
         </style>
         """,
@@ -602,6 +665,8 @@ def init_session_state():
         st.session_state["marine_region"] = None
     if "marine_loaded_at" not in st.session_state:
         st.session_state["marine_loaded_at"] = None
+    if "marine_selected_region" not in st.session_state:
+        st.session_state["marine_selected_region"] = "Europe"
 
 
 def render_metric_card(title, value, detail, accent):
@@ -616,6 +681,34 @@ def render_metric_card(title, value, detail, accent):
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_region_card(region_name: str, loaded_region):
+    accent = "#38bdf8" if loaded_region == region_name else "#7dd3fc"
+    chip_text = "Loaded region" if loaded_region == region_name else "Quick load"
+    card_classes = "region-card region-card-active" if loaded_region == region_name else "region-card"
+    summary = REGION_BRIEFS.get(region_name, "Regional AIS snapshot coverage.")
+
+    st.markdown(
+        f"""
+        <div class="{card_classes}">
+            <div class="region-chip" style="background:{accent};">{html.escape(chip_text.upper())}</div>
+            <div class="region-name">{html.escape(region_name)}</div>
+            <div class="region-copy">{html.escape(summary)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def load_region_snapshot(region_name: str):
+    df, source, error = fetch_ais_region(region_name)
+    st.session_state["marine_df"] = df
+    st.session_state["marine_source"] = source
+    st.session_state["marine_error"] = error
+    st.session_state["marine_region"] = region_name
+    st.session_state["marine_selected_region"] = region_name
+    st.session_state["marine_loaded_at"] = pd.Timestamp.utcnow()
 
 
 def apply_filters(df: pd.DataFrame, search_query: str, visible_categories, abnormal_only: bool, tankers_only: bool):
@@ -776,6 +869,7 @@ def make_feed_table(df: pd.DataFrame):
 
 inject_styles()
 init_session_state()
+loaded_region = st.session_state["marine_region"]
 
 st.markdown(
     """
@@ -783,25 +877,55 @@ st.markdown(
         <div class="hero-kicker">LIVE MARITIME SURVEILLANCE</div>
         <h1 class="hero-title">Abnormal Marine Activity</h1>
         <p class="hero-copy">
-            
+            A polished regional watchboard for commercial vessel traffic, abnormal movement signals,
+            and tanker or energy shipping relevance using public AIS position snapshots.
+        </p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
+st.markdown(
+    """
+    <div class="panel-card">
+        <div class="panel-title">Regional Access</div>
+        <div class="panel-copy">
+            Click a region below to load its AIS snapshot directly from the main workspace.
+            Sidebar controls remain available for search, filters, and map layers once a region is loaded.
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+region_names = list(CONTINENT_BOXES.keys())
+for region_row in [region_names[:3], region_names[3:]]:
+    row_columns = st.columns(3, gap="large")
+    for column, region_name in zip(row_columns, region_row):
+        with column:
+            render_region_card(region_name, loaded_region)
+            button_label = f"Load {region_name}"
+            if loaded_region == region_name:
+                button_label = f"Reload {region_name}"
+            if st.button(button_label, key=f"main_region_load_{region_name}", use_container_width=True):
+                with st.spinner(f"Loading AIS snapshot for {region_name}..."):
+                    load_region_snapshot(region_name)
+                st.rerun()
+
+st.markdown("")
+
 with st.sidebar:
     st.markdown("### Region Controls")
-    selected_region = st.selectbox("Continent", list(CONTINENT_BOXES.keys()), index=2)
+    selected_region = st.selectbox(
+        "Continent",
+        list(CONTINENT_BOXES.keys()),
+        key="marine_selected_region",
+    )
     load_clicked = st.button("Load selected region", type="primary", use_container_width=True)
 
     if load_clicked:
         with st.spinner(f"Loading AIS snapshot for {selected_region}..."):
-            df, source, error = fetch_ais_region(selected_region)
-            st.session_state["marine_df"] = df
-            st.session_state["marine_source"] = source
-            st.session_state["marine_error"] = error
-            st.session_state["marine_region"] = selected_region
-            st.session_state["marine_loaded_at"] = pd.Timestamp.utcnow()
+            load_region_snapshot(selected_region)
             st.rerun()
 
     st.markdown("### Traffic Filters")
@@ -829,7 +953,7 @@ loaded_region = st.session_state["marine_region"]
 loaded_at = st.session_state["marine_loaded_at"]
 
 if vessels_df.empty:
-    st.info("Choose a continent and click `Load selected region` to fetch a regional AIS snapshot.")
+    st.info("Choose a region from the main page grid or use the sidebar to load a regional AIS snapshot.")
     st.stop()
 
 filtered_df = apply_filters(
