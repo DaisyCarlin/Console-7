@@ -22,16 +22,16 @@ TRAIL_AUTO_LIMIT = 260
 VECTOR_AUTO_LIMIT = 380
 
 WATCHED_COUNTRIES = {
-    "united states": "Watched state traffic",
-    "russia": "Watched state traffic",
-    "china": "Watched state traffic",
-    "united kingdom": "Watched state traffic",
-    "france": "Watched state traffic",
-    "germany": "Watched state traffic",
-    "italy": "Watched state traffic",
-    "turkey": "Watched state traffic",
-    "israel": "Watched state traffic",
-    "india": "Watched state traffic",
+    "united states": "Government watchlist traffic",
+    "russia": "Government watchlist traffic",
+    "china": "Government watchlist traffic",
+    "united kingdom": "Government watchlist traffic",
+    "france": "Government watchlist traffic",
+    "germany": "Government watchlist traffic",
+    "italy": "Government watchlist traffic",
+    "turkey": "Government watchlist traffic",
+    "israel": "Government watchlist traffic",
+    "india": "Government watchlist traffic",
 }
 
 MILITARY_CALLSIGN_RULES = [
@@ -97,15 +97,13 @@ MAP_THEMES = {
 ALERT_COLORS = {
     "Emergency": "#ff5f6d",
     "Military": "#58a6ff",
-    "State-linked": "#8a7dff",
-    "Civilian": "#39d98a",
+    "Government": "#8a7dff",
 }
 
 ALERT_PRIORITY = {
     "Emergency": 0,
     "Military": 1,
-    "State-linked": 2,
-    "Civilian": 3,
+    "Government": 2,
 }
 
 
@@ -299,7 +297,7 @@ def decode_squawk(squawk):
     meta = SQUAWK_MEANINGS.get(normalized)
     if meta:
         return True, meta["label"], meta["reason"], meta["severity"], meta["color"]
-    return False, "", "", "NORMAL", ALERT_COLORS["Civilian"]
+    return False, "", "", "NORMAL", ALERT_COLORS["Government"]
 
 
 def determine_alert_category(row):
@@ -308,8 +306,8 @@ def determine_alert_category(row):
     if row["is_military"]:
         return "Military"
     if row["is_state_watch"]:
-        return "State-linked"
-    return "Civilian"
+        return "Government"
+    return "Other"
 
 
 def meters_to_feet(value):
@@ -449,7 +447,7 @@ def get_trail_points(icao24, visible_points):
 
 
 def build_plane_icon_html(row, show_label):
-    color = row.get("marker_color", ALERT_COLORS["Civilian"])
+    color = row.get("marker_color", ALERT_COLORS["Government"])
     angle = safe_heading(row.get("true_track"))
     glow = f"0 0 0 1px rgba(255,255,255,0.18), 0 10px 22px {color}55"
 
@@ -482,9 +480,9 @@ def build_popup_html(row):
     squawk = html.escape(row.get("squawk") or "None")
     emergency_reason = html.escape(row.get("emergency_reason") or "No special squawk detected")
     military_reason = html.escape(row.get("military_reason") or "No military callsign heuristic match")
-    state_reason = html.escape(row.get("state_watch_reason") or "No watched-state match")
-    category = html.escape(row.get("alert_category") or "Civilian")
-    color = row.get("marker_color", ALERT_COLORS["Civilian"])
+    state_reason = html.escape(row.get("state_watch_reason") or "No government heuristic match")
+    category = html.escape(row.get("alert_category") or "Government")
+    color = row.get("marker_color", ALERT_COLORS["Government"])
 
     return f"""
         <div style="min-width: 260px; font-family: Segoe UI, sans-serif;">
@@ -501,7 +499,7 @@ def build_popup_html(row):
                 <tr><td style="padding:4px 0; color:#5a6d85;">Squawk</td><td style="padding:4px 0; font-weight:600;">{squawk}</td></tr>
                 <tr><td style="padding:4px 0; color:#5a6d85;">Emergency</td><td style="padding:4px 0;">{emergency_reason}</td></tr>
                 <tr><td style="padding:4px 0; color:#5a6d85;">Military</td><td style="padding:4px 0;">{military_reason}</td></tr>
-                <tr><td style="padding:4px 0; color:#5a6d85;">State watch</td><td style="padding:4px 0;">{state_reason}</td></tr>
+                <tr><td style="padding:4px 0; color:#5a6d85;">Government</td><td style="padding:4px 0;">{state_reason}</td></tr>
                 <tr><td style="padding:4px 0; color:#5a6d85;">Altitude</td><td style="padding:4px 0;">{format_altitude(row.get("baro_altitude"))}</td></tr>
                 <tr><td style="padding:4px 0; color:#5a6d85;">Speed</td><td style="padding:4px 0;">{format_speed(row.get("velocity"))}</td></tr>
                 <tr><td style="padding:4px 0; color:#5a6d85;">Vertical rate</td><td style="padding:4px 0;">{format_vertical_rate(row.get("vertical_rate"))}</td></tr>
@@ -580,7 +578,7 @@ def load_flights():
     ] = pd.DataFrame(emergency_matches.tolist(), index=df.index)
 
     df["alert_category"] = df.apply(determine_alert_category, axis=1)
-    df["marker_color"] = df["alert_category"].map(ALERT_COLORS).fillna(ALERT_COLORS["Civilian"])
+    df["marker_color"] = df["alert_category"].map(ALERT_COLORS).fillna(ALERT_COLORS["Government"])
     df["altitude_ft"] = df["baro_altitude"].apply(meters_to_feet)
     df["speed_kt"] = df["velocity"].apply(mps_to_knots)
     df["vertical_rate_fpm"] = df["vertical_rate"].apply(mps_to_fpm)
@@ -931,7 +929,7 @@ def make_feed_table(df):
             "squawk": "Squawk",
             "squawk_label": "Emergency Label",
             "military_reason": "Military Reason",
-            "state_watch_reason": "State Watch Reason",
+            "state_watch_reason": "Government Reason",
             "speed_kt": "Speed (kt)",
             "altitude_ft": "Altitude (ft)",
             "true_track": "Track",
@@ -980,8 +978,8 @@ st.markdown(
         <div class="hero-kicker">LIVE AIRSPACE SURVEILLANCE</div>
         <h1 class="hero-title">SkyScope Radar</h1>
         <p class="hero-copy">
-            A cleaner flight-radar-style dashboard with decoded emergency squawks, military heuristics,
-            watched-state traffic, and motion trails that build during the live session.
+            A focused flight-radar-style dashboard for decoded emergency squawks and military or government traffic,
+            with motion trails that build during the live session.
         </p>
     </div>
     """,
@@ -1040,8 +1038,8 @@ with st.sidebar:
     st.markdown("### Map Filters")
     visible_categories = st.multiselect(
         "Show on map",
-        options=["Emergency", "Military", "State-linked", "Civilian"],
-        default=["Emergency", "Military", "State-linked", "Civilian"],
+        options=["Emergency", "Military", "Government"],
+        default=["Emergency", "Military", "Government"],
     )
     map_render_limit = st.slider(
         "Map flight limit",
@@ -1064,14 +1062,18 @@ with st.sidebar:
             st.rerun()
 
 if data_error:
+    priority_only_df = pd.DataFrame()
     filtered_df = pd.DataFrame()
     feed_df = pd.DataFrame()
     map_df = pd.DataFrame()
     selected_flight_row = pd.DataFrame()
     total_map_matches = 0
 else:
+    priority_only_df = flights_df[
+        flights_df["is_emergency"] | flights_df["is_military"] | flights_df["is_state_watch"]
+    ].copy()
     filtered_df = filter_base_flights(
-        flights_df,
+        priority_only_df,
         airborne_only=airborne_only,
         selected_squawks=selected_squawks,
         altitude_range=altitude_range,
@@ -1080,7 +1082,7 @@ else:
     feed_df = filter_map_categories(filtered_df, visible_categories)
     map_df, total_map_matches, selected_flight_row = prepare_map_dataframe(
         filtered_df,
-        flights_df,
+        priority_only_df,
         visible_categories=visible_categories,
         map_render_limit=map_render_limit,
         selected_flight_key=st.session_state.get("focused_flight_key", ""),
@@ -1096,7 +1098,12 @@ if len(map_df) > total_map_matches:
     visible_map_detail += " plus 1 selected flight"
 
 with metric_columns[0]:
-    render_metric_card("Flights in feed", f"{len(flights_df):,}", "OpenSky live state records loaded", "#38bdf8")
+    render_metric_card(
+        "Tracked flights",
+        f"{len(priority_only_df):,}",
+        "Emergency and military or government traffic in the live feed",
+        "#38bdf8",
+    )
 with metric_columns[1]:
     render_metric_card(
         "Visible on map",
@@ -1123,8 +1130,7 @@ with map_col:
         <div class="panel-card">
             <div class="panel-title">Live Radar Map</div>
             <div class="panel-copy">
-                Emergency flights are red, military heuristics are blue, watched-state traffic is purple,
-                and civilian traffic is green.
+                Emergency flights are red, military heuristics are blue, and government heuristics are purple.
             </div>
         </div>
         """,
@@ -1169,7 +1175,7 @@ with side_col:
                 <div class="panel-title">{html.escape(safe_str(selected_record.get("callsign") or selected_record.get("icao24") or "Unknown"))}</div>
                 <div class="panel-copy">
                     {html.escape(safe_str(selected_record.get("origin_country") or "Unknown"))}<br>
-                    {html.escape(safe_str(selected_record.get("alert_category") or "Civilian"))}<br>
+                    {html.escape(safe_str(selected_record.get("alert_category") or "Government"))}<br>
                     Squawk: {html.escape(safe_str(selected_record.get("squawk") or "None"))}<br>
                     Altitude: {format_altitude(selected_record.get("baro_altitude"))}<br>
                     Speed: {format_speed(selected_record.get("velocity"))}
@@ -1218,7 +1224,7 @@ with side_col:
     )
     st.dataframe(squawk_guide, use_container_width=True, hide_index=True)
 
-    st.caption("Military and watched-state markers are public heuristics only and should not be treated as authoritative identification.")
+    st.caption("Military and government markers are public heuristics only and should not be treated as authoritative identification.")
 
 tab_emergency, tab_military, tab_feed = st.tabs(["Emergency Watch", "Military Watch", "Live Feed"])
 
@@ -1266,6 +1272,6 @@ with tab_feed:
 
 st.markdown("---")
 st.caption(
-    f"Loaded {len(flights_df):,} flights, {len(emergency_df):,} emergency squawks, "
-    f"{len(military_df):,} military heuristic matches, and {len(state_watch_df):,} watched-state flights."
+    f"Tracking {len(priority_only_df):,} flights, with {len(emergency_df):,} emergency squawks, "
+    f"{len(military_df):,} military heuristic matches, and {len(state_watch_df):,} government heuristic matches."
 )
