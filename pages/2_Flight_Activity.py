@@ -21,19 +21,6 @@ MAX_MAP_RENDER_LIMIT = 900
 TRAIL_AUTO_LIMIT = 260
 VECTOR_AUTO_LIMIT = 380
 
-WATCHED_COUNTRIES = {
-    "united states": "Government watchlist traffic",
-    "russia": "Government watchlist traffic",
-    "china": "Government watchlist traffic",
-    "united kingdom": "Government watchlist traffic",
-    "france": "Government watchlist traffic",
-    "germany": "Government watchlist traffic",
-    "italy": "Government watchlist traffic",
-    "turkey": "Government watchlist traffic",
-    "israel": "Government watchlist traffic",
-    "india": "Government watchlist traffic",
-}
-
 MILITARY_CALLSIGN_RULES = [
     ("RCH", "US Air Mobility Command / Reach transport"),
     ("MC", "Military transport callsign family"),
@@ -54,26 +41,26 @@ MILITARY_CALLSIGN_RULES = [
 
 SQUAWK_MEANINGS = {
     "7500": {
-        "label": "Hijack / unlawful interference",
-        "reason": "Special squawk 7500 is used for unlawful interference or hijacking.",
+        "label": "7500 detected",
+        "reason": "Raw feed shows special squawk 7500. This may indicate unlawful interference, but should be confirmed before treating as real.",
         "severity": "CRITICAL",
         "color": "#ff5f6d",
     },
     "7600": {
-        "label": "Radio failure",
-        "reason": "Special squawk 7600 indicates a communications failure.",
+        "label": "7600 detected",
+        "reason": "Raw feed shows special squawk 7600. This may indicate communications failure, but should be confirmed before treating as real.",
         "severity": "HIGH",
         "color": "#ff9e3d",
     },
     "7700": {
-        "label": "General emergency",
-        "reason": "Special squawk 7700 signals a general emergency requiring priority handling.",
+        "label": "7700 detected",
+        "reason": "Raw feed shows special squawk 7700. This may indicate a general emergency, but should be confirmed before treating as real.",
         "severity": "CRITICAL",
         "color": "#ff5f6d",
     },
     "7400": {
-        "label": "UAS lost link",
-        "reason": "Special squawk 7400 is commonly used for unmanned aircraft lost-link events.",
+        "label": "7400 detected",
+        "reason": "Raw feed shows special squawk 7400, often associated with UAS lost-link events.",
         "severity": "MEDIUM",
         "color": "#f2cc60",
     },
@@ -97,13 +84,15 @@ MAP_THEMES = {
 ALERT_COLORS = {
     "Emergency": "#ff5f6d",
     "Military": "#58a6ff",
-    "Government": "#8a7dff",
+    "No Callsign": "#f2cc60",
+    "Normal": "#7dd3fc",
 }
 
 ALERT_PRIORITY = {
     "Emergency": 0,
     "Military": 1,
-    "Government": 2,
+    "No Callsign": 2,
+    "Normal": 3,
 }
 
 
@@ -284,20 +273,12 @@ def detect_military_callsign(callsign):
     return False, ""
 
 
-def detect_state_watch(country):
-    lowered = safe_str(country).lower()
-    for keyword, reason in WATCHED_COUNTRIES.items():
-        if keyword in lowered:
-            return True, reason
-    return False, ""
-
-
 def decode_squawk(squawk):
     normalized = normalize_squawk(squawk)
     meta = SQUAWK_MEANINGS.get(normalized)
     if meta:
         return True, meta["label"], meta["reason"], meta["severity"], meta["color"]
-    return False, "", "", "NORMAL", ALERT_COLORS["Government"]
+    return False, "", "", "NORMAL", ALERT_COLORS["Normal"]
 
 
 def determine_alert_category(row):
@@ -305,9 +286,9 @@ def determine_alert_category(row):
         return "Emergency"
     if row["is_military"]:
         return "Military"
-    if row["is_state_watch"]:
-        return "Government"
-    return "Other"
+    if row["is_no_callsign"]:
+        return "No Callsign"
+    return "Normal"
 
 
 def meters_to_feet(value):
@@ -447,13 +428,13 @@ def get_trail_points(icao24, visible_points):
 
 
 def build_plane_icon_html(row, show_label):
-    color = row.get("marker_color", ALERT_COLORS["Government"])
+    color = row.get("marker_color", ALERT_COLORS["Normal"])
     angle = safe_heading(row.get("true_track"))
     glow = f"0 0 0 1px rgba(255,255,255,0.18), 0 10px 22px {color}55"
 
     label_html = ""
     if show_label:
-        label = html.escape((row.get("callsign") or row.get("icao24") or "Unknown")[:10])
+        label = html.escape((row.get("callsign") or "N/A" or row.get("icao24") or "Unknown")[:10])
         label_html = (
             f'<div style="margin-top:3px; padding:2px 7px; border-radius:999px; '
             f'background:rgba(7,17,31,0.88); color:#f4f9ff; font-size:10px; font-weight:700; '
@@ -475,14 +456,13 @@ def build_plane_icon_html(row, show_label):
 
 
 def build_popup_html(row):
-    callsign = html.escape(row.get("callsign") or row.get("icao24") or "Unknown")
+    callsign = html.escape(row.get("callsign") or "N/A")
     country = html.escape(row.get("origin_country") or "Unknown")
     squawk = html.escape(row.get("squawk") or "None")
     emergency_reason = html.escape(row.get("emergency_reason") or "No special squawk detected")
     military_reason = html.escape(row.get("military_reason") or "No military callsign heuristic match")
-    state_reason = html.escape(row.get("state_watch_reason") or "No government heuristic match")
-    category = html.escape(row.get("alert_category") or "Government")
-    color = row.get("marker_color", ALERT_COLORS["Government"])
+    category = html.escape(row.get("alert_category") or "Normal")
+    color = row.get("marker_color", ALERT_COLORS["Normal"])
 
     return f"""
         <div style="min-width: 260px; font-family: Segoe UI, sans-serif;">
@@ -496,10 +476,10 @@ def build_popup_html(row):
                 </div>
             </div>
             <table style="width:100%; border-collapse:collapse; font-size:12px;">
+                <tr><td style="padding:4px 0; color:#5a6d85;">ICAO24</td><td style="padding:4px 0; font-weight:600;">{html.escape(safe_str(row.get("icao24")) or "Unknown")}</td></tr>
                 <tr><td style="padding:4px 0; color:#5a6d85;">Squawk</td><td style="padding:4px 0; font-weight:600;">{squawk}</td></tr>
                 <tr><td style="padding:4px 0; color:#5a6d85;">Emergency</td><td style="padding:4px 0;">{emergency_reason}</td></tr>
                 <tr><td style="padding:4px 0; color:#5a6d85;">Military</td><td style="padding:4px 0;">{military_reason}</td></tr>
-                <tr><td style="padding:4px 0; color:#5a6d85;">Government</td><td style="padding:4px 0;">{state_reason}</td></tr>
                 <tr><td style="padding:4px 0; color:#5a6d85;">Altitude</td><td style="padding:4px 0;">{format_altitude(row.get("baro_altitude"))}</td></tr>
                 <tr><td style="padding:4px 0; color:#5a6d85;">Speed</td><td style="padding:4px 0;">{format_speed(row.get("velocity"))}</td></tr>
                 <tr><td style="padding:4px 0; color:#5a6d85;">Vertical rate</td><td style="padding:4px 0;">{format_vertical_rate(row.get("vertical_rate"))}</td></tr>
@@ -563,9 +543,6 @@ def load_flights():
     military_matches = df["callsign"].apply(detect_military_callsign)
     df[["is_military", "military_reason"]] = pd.DataFrame(military_matches.tolist(), index=df.index)
 
-    state_matches = df["origin_country"].apply(detect_state_watch)
-    df[["is_state_watch", "state_watch_reason"]] = pd.DataFrame(state_matches.tolist(), index=df.index)
-
     emergency_matches = df["squawk"].apply(decode_squawk)
     df[
         [
@@ -577,19 +554,29 @@ def load_flights():
         ]
     ] = pd.DataFrame(emergency_matches.tolist(), index=df.index)
 
+    df["is_no_callsign"] = df["callsign"].fillna("").str.strip().eq("")
+
     df["alert_category"] = df.apply(determine_alert_category, axis=1)
-    df["marker_color"] = df["alert_category"].map(ALERT_COLORS).fillna(ALERT_COLORS["Government"])
+    df["marker_color"] = df["alert_category"].map(ALERT_COLORS).fillna(ALERT_COLORS["Normal"])
     df["altitude_ft"] = df["baro_altitude"].apply(meters_to_feet)
     df["speed_kt"] = df["velocity"].apply(mps_to_knots)
     df["vertical_rate_fpm"] = df["vertical_rate"].apply(mps_to_fpm)
     df["icao_key"] = df["icao24"].apply(normalize_flight_key)
     df["alert_sort"] = df["alert_category"].map(ALERT_PRIORITY).fillna(99)
-    df = df.sort_values(["alert_sort", "last_contact"], ascending=[True, False]).reset_index(drop=True)
 
+    df = df.sort_values(["alert_sort", "last_contact"], ascending=[True, False]).reset_index(drop=True)
     return df
 
 
-def filter_base_flights(df, airborne_only, selected_squawks, altitude_range, flight_search):
+def filter_base_flights(
+    df,
+    airborne_only,
+    selected_squawks,
+    altitude_range,
+    flight_search,
+    show_no_callsign_only,
+    military_only,
+):
     filtered = df.copy()
     if filtered.empty:
         return filtered
@@ -616,6 +603,12 @@ def filter_base_flights(df, airborne_only, selected_squawks, altitude_range, fli
             | filtered["squawk"].fillna("").str.lower().str.contains(search_text, na=False)
             | filtered["squawk_label"].fillna("").str.lower().str.contains(search_text, na=False)
         ]
+
+    if show_no_callsign_only:
+        filtered = filtered[filtered["is_no_callsign"] == True]
+
+    if military_only:
+        filtered = filtered[filtered["is_military"] == True]
 
     return filtered.reset_index(drop=True)
 
@@ -790,7 +783,7 @@ def create_map(
                     dash_array="8 8",
                 ).add_to(vector_layer)
 
-        tooltip = f"{row.get('callsign') or row.get('icao24') or 'Unknown'} | {row['alert_category']}"
+        tooltip = f"{(row.get('callsign') or 'N/A')} | {row['alert_category']}"
         folium.Marker(
             location=[lat, lon],
             tooltip=tooltip,
@@ -854,13 +847,10 @@ def make_emergency_table(df):
             "last_contact": "Last Contact",
         }
     )
+    table["Callsign"] = table["Callsign"].replace("", "N/A")
     table["Last Contact"] = table["Last Contact"].apply(format_timestamp)
-    table["Speed (kt)"] = table["Speed (kt)"].apply(
-        lambda value: None if pd.isna(value) else round(float(value))
-    )
-    table["Altitude (ft)"] = table["Altitude (ft)"].apply(
-        lambda value: None if pd.isna(value) else round(float(value))
-    )
+    table["Speed (kt)"] = table["Speed (kt)"].apply(lambda value: None if pd.isna(value) else round(float(value)))
+    table["Altitude (ft)"] = table["Altitude (ft)"].apply(lambda value: None if pd.isna(value) else round(float(value)))
     return table
 
 
@@ -892,13 +882,10 @@ def make_military_table(df):
             "last_contact": "Last Contact",
         }
     )
+    table["Callsign"] = table["Callsign"].replace("", "N/A")
     table["Last Contact"] = table["Last Contact"].apply(format_timestamp)
-    table["Speed (kt)"] = table["Speed (kt)"].apply(
-        lambda value: None if pd.isna(value) else round(float(value))
-    )
-    table["Altitude (ft)"] = table["Altitude (ft)"].apply(
-        lambda value: None if pd.isna(value) else round(float(value))
-    )
+    table["Speed (kt)"] = table["Speed (kt)"].apply(lambda value: None if pd.isna(value) else round(float(value)))
+    table["Altitude (ft)"] = table["Altitude (ft)"].apply(lambda value: None if pd.isna(value) else round(float(value)))
     return table
 
 
@@ -909,12 +896,12 @@ def make_feed_table(df):
     table = df[
         [
             "callsign",
+            "icao24",
             "origin_country",
             "alert_category",
             "squawk",
             "squawk_label",
             "military_reason",
-            "state_watch_reason",
             "speed_kt",
             "altitude_ft",
             "true_track",
@@ -924,28 +911,63 @@ def make_feed_table(df):
     table = table.rename(
         columns={
             "callsign": "Callsign",
+            "icao24": "ICAO24",
             "origin_country": "Origin Country",
             "alert_category": "Category",
             "squawk": "Squawk",
             "squawk_label": "Emergency Label",
             "military_reason": "Military Reason",
-            "state_watch_reason": "Government Reason",
             "speed_kt": "Speed (kt)",
             "altitude_ft": "Altitude (ft)",
             "true_track": "Track",
             "last_contact": "Last Contact",
         }
     )
+    table["Callsign"] = table["Callsign"].replace("", "N/A")
     table["Last Contact"] = table["Last Contact"].apply(format_timestamp)
-    table["Speed (kt)"] = table["Speed (kt)"].apply(
-        lambda value: None if pd.isna(value) else round(float(value))
+    table["Speed (kt)"] = table["Speed (kt)"].apply(lambda value: None if pd.isna(value) else round(float(value)))
+    table["Altitude (ft)"] = table["Altitude (ft)"].apply(lambda value: None if pd.isna(value) else round(float(value)))
+    table["Track"] = table["Track"].apply(lambda value: None if pd.isna(value) else round(float(value)))
+    return table
+
+
+def make_no_callsign_table(df):
+    if df.empty:
+        return df
+
+    table = df[
+        [
+            "callsign",
+            "icao24",
+            "origin_country",
+            "alert_category",
+            "squawk",
+            "squawk_label",
+            "speed_kt",
+            "altitude_ft",
+            "true_track",
+            "last_contact",
+        ]
+    ].copy()
+    table = table.rename(
+        columns={
+            "callsign": "Callsign",
+            "icao24": "ICAO24",
+            "origin_country": "Origin Country",
+            "alert_category": "Category",
+            "squawk": "Squawk",
+            "squawk_label": "Emergency Label",
+            "speed_kt": "Speed (kt)",
+            "altitude_ft": "Altitude (ft)",
+            "true_track": "Track",
+            "last_contact": "Last Contact",
+        }
     )
-    table["Altitude (ft)"] = table["Altitude (ft)"].apply(
-        lambda value: None if pd.isna(value) else round(float(value))
-    )
-    table["Track"] = table["Track"].apply(
-        lambda value: None if pd.isna(value) else round(float(value))
-    )
+    table["Callsign"] = "N/A"
+    table["Last Contact"] = table["Last Contact"].apply(format_timestamp)
+    table["Speed (kt)"] = table["Speed (kt)"].apply(lambda value: None if pd.isna(value) else round(float(value)))
+    table["Altitude (ft)"] = table["Altitude (ft)"].apply(lambda value: None if pd.isna(value) else round(float(value)))
+    table["Track"] = table["Track"].apply(lambda value: None if pd.isna(value) else round(float(value)))
     return table
 
 
@@ -978,7 +1000,9 @@ st.markdown(
         <div class="hero-kicker">LIVE AIRSPACE SURVEILLANCE</div>
         <h1 class="hero-title">Flight Activity</h1>
         <p class="hero-copy">
-            
+            Live OpenSky-based radar for all visible flights, with optional filters for emergency squawks,
+            military callsign heuristics, and flights showing no visible callsign.
+        </p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -1007,6 +1031,8 @@ with st.sidebar:
     )
 
     airborne_only = st.toggle("Airborne only", value=True)
+    military_only = st.toggle("Only show military heuristic flights", value=False)
+    show_no_callsign_only = st.toggle("Only show N/A callsign flights", value=False)
 
     selected_squawks = st.multiselect(
         "Emergency filters",
@@ -1036,8 +1062,8 @@ with st.sidebar:
     st.markdown("### Map Filters")
     visible_categories = st.multiselect(
         "Show on map",
-        options=["Emergency", "Military", "Government"],
-        default=["Emergency", "Military", "Government"],
+        options=["Emergency", "Military", "No Callsign", "Normal"],
+        default=["Emergency", "Military", "No Callsign", "Normal"],
     )
     map_render_limit = st.slider(
         "Map flight limit",
@@ -1060,27 +1086,27 @@ with st.sidebar:
             st.rerun()
 
 if data_error:
-    priority_only_df = pd.DataFrame()
+    all_flights_df = pd.DataFrame()
     filtered_df = pd.DataFrame()
     feed_df = pd.DataFrame()
     map_df = pd.DataFrame()
     selected_flight_row = pd.DataFrame()
     total_map_matches = 0
 else:
-    priority_only_df = flights_df[
-        flights_df["is_emergency"] | flights_df["is_military"] | flights_df["is_state_watch"]
-    ].copy()
+    all_flights_df = flights_df.copy()
     filtered_df = filter_base_flights(
-        priority_only_df,
+        all_flights_df,
         airborne_only=airborne_only,
         selected_squawks=selected_squawks,
         altitude_range=altitude_range,
         flight_search=flight_search.strip().lower(),
+        show_no_callsign_only=show_no_callsign_only,
+        military_only=military_only,
     )
     feed_df = filter_map_categories(filtered_df, visible_categories)
     map_df, total_map_matches, selected_flight_row = prepare_map_dataframe(
         filtered_df,
-        priority_only_df,
+        all_flights_df,
         visible_categories=visible_categories,
         map_render_limit=map_render_limit,
         selected_flight_key=st.session_state.get("focused_flight_key", ""),
@@ -1088,7 +1114,7 @@ else:
 
 emergency_df = filtered_df[filtered_df["is_emergency"]].copy() if not filtered_df.empty else pd.DataFrame()
 military_df = filtered_df[filtered_df["is_military"]].copy() if not filtered_df.empty else pd.DataFrame()
-state_watch_df = filtered_df[filtered_df["is_state_watch"]].copy() if not filtered_df.empty else pd.DataFrame()
+no_callsign_df = filtered_df[filtered_df["is_no_callsign"]].copy() if not filtered_df.empty else pd.DataFrame()
 
 metric_columns = st.columns(4)
 visible_map_detail = f"{total_map_matches:,} match the current map filters"
@@ -1098,8 +1124,8 @@ if len(map_df) > total_map_matches:
 with metric_columns[0]:
     render_metric_card(
         "Tracked flights",
-        f"{len(priority_only_df):,}",
-        "Emergency and military or government traffic in the live feed",
+        f"{len(all_flights_df):,}",
+        "All flights currently visible in the live feed",
         "#38bdf8",
     )
 with metric_columns[1]:
@@ -1110,7 +1136,12 @@ with metric_columns[1]:
         "#7dd3fc",
     )
 with metric_columns[2]:
-    render_metric_card("Emergency squawks", f"{len(emergency_df):,}", "Decoded special squawks with reasons", "#ff5f6d")
+    render_metric_card(
+        "Emergency squawks",
+        f"{len(emergency_df):,}",
+        "Raw special squawks decoded from the feed",
+        "#ff5f6d",
+    )
 with metric_columns[3]:
     if data_error:
         render_metric_card("Feed status", "Offline", "Upstream flight feed error detected", "#ff5f6d")
@@ -1128,7 +1159,7 @@ with map_col:
         <div class="panel-card">
             <div class="panel-title">Live Radar Map</div>
             <div class="panel-copy">
-                Emergency flights are red, military heuristics are blue, and government heuristics are purple.
+                Emergency flights are red, military heuristics are blue, no-callsign flights are amber, and all other flights are cyan.
             </div>
         </div>
         """,
@@ -1170,10 +1201,10 @@ with side_col:
         st.markdown(
             f"""
             <div class="panel-card">
-                <div class="panel-title">{html.escape(safe_str(selected_record.get("callsign") or selected_record.get("icao24") or "Unknown"))}</div>
+                <div class="panel-title">{html.escape(safe_str(selected_record.get("callsign") or "N/A"))}</div>
                 <div class="panel-copy">
                     {html.escape(safe_str(selected_record.get("origin_country") or "Unknown"))}<br>
-                    {html.escape(safe_str(selected_record.get("alert_category") or "Government"))}<br>
+                    {html.escape(safe_str(selected_record.get("alert_category") or "Normal"))}<br>
                     Squawk: {html.escape(safe_str(selected_record.get("squawk") or "None"))}<br>
                     Altitude: {format_altitude(selected_record.get("baro_altitude"))}<br>
                     Speed: {format_speed(selected_record.get("velocity"))}
@@ -1183,12 +1214,9 @@ with side_col:
             unsafe_allow_html=True,
         )
 
-    if {"is_emergency", "is_military", "is_state_watch"}.issubset(feed_df.columns):
-        active_alerts = feed_df[
-            feed_df["is_emergency"] | feed_df["is_military"] | feed_df["is_state_watch"]
-        ].copy()
-    else:
-        active_alerts = pd.DataFrame()
+    active_alerts = feed_df[
+        feed_df["is_emergency"] | feed_df["is_military"] | feed_df["is_no_callsign"]
+    ].copy() if {"is_emergency", "is_military", "is_no_callsign"}.issubset(feed_df.columns) else pd.DataFrame()
 
     st.markdown("#### Active alerts")
     if active_alerts.empty:
@@ -1206,6 +1234,7 @@ with side_col:
                 "military_reason": "Military reason",
             }
         )
+        alert_table["Callsign"] = alert_table["Callsign"].replace("", "N/A")
         st.dataframe(alert_table, use_container_width=True, hide_index=True)
 
     st.markdown("#### Special squawk guide")
@@ -1222,9 +1251,11 @@ with side_col:
     )
     st.dataframe(squawk_guide, use_container_width=True, hide_index=True)
 
-    st.caption("Military and government markers are public heuristics only and should not be treated as authoritative identification.")
+    st.caption("Military tags are public callsign heuristics only. Emergency labels are raw-feed interpretations and should be confirmed before being treated as real incidents.")
 
-tab_emergency, tab_military, tab_feed = st.tabs(["Emergency Watch", "Military Watch", "Live Feed"])
+tab_emergency, tab_military, tab_nocallsign, tab_feed = st.tabs(
+    ["Emergency Watch", "Military Watch", "N/A Callsign", "Live Feed"]
+)
 
 with tab_emergency:
     st.markdown("### Emergency Flights")
@@ -1254,9 +1285,24 @@ with tab_military:
             "military_table",
         )
 
+with tab_nocallsign:
+    st.markdown("### Flights With No Callsign")
+    st.caption("Aircraft broadcasting ADS-B data without a visible callsign string.")
+
+    if data_error:
+        st.error(f"Flight feed unavailable: {data_error}")
+    elif no_callsign_df.empty:
+        st.info("No N/A callsign flights match filters.")
+    else:
+        render_selectable_flight_table(
+            no_callsign_df,
+            make_no_callsign_table(no_callsign_df),
+            "no_callsign_table",
+        )
+
 with tab_feed:
-    st.markdown("### Filtered Feed")
-    st.caption("This table follows the sidebar search and map filters so you can inspect exactly what the map is showing.")
+    st.markdown("### Live Feed")
+    st.caption("This table follows the sidebar search and filter settings so you can inspect exactly what the map is showing.")
     if data_error:
         st.error(f"Flight feed unavailable: {data_error}")
     elif feed_df.empty:
@@ -1270,6 +1316,6 @@ with tab_feed:
 
 st.markdown("---")
 st.caption(
-    f"Tracking {len(priority_only_df):,} flights, with {len(emergency_df):,} emergency squawks, "
-    f"{len(military_df):,} military heuristic matches, and {len(state_watch_df):,} government heuristic matches."
+    f"Tracking {len(all_flights_df):,} flights, with {len(emergency_df):,} emergency squawks, "
+    f"{len(military_df):,} military heuristic matches, and {len(no_callsign_df):,} no-callsign flights."
 )
