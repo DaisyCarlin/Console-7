@@ -1,9 +1,10 @@
+import json
 import math
 import streamlit as st
 import pandas as pd
-import requests
 import folium
 from streamlit_folium import st_folium
+from websocket import create_connection
 
 st.set_page_config(page_title="Marine Activity", layout="wide")
 
@@ -13,26 +14,7 @@ st.caption("Open-source maritime monitoring for commercial shipping, tanker flow
 # =========================================================
 # CONFIG
 # =========================================================
-
-# Optional live feed:
-# If you later add st.secrets["marine_feed_url"], the page will try to load it.
-# Expected JSON format:
-# [
-#   {
-#     "name": "GLOBAL ENERGY",
-#     "mmsi": "538009999",
-#     "imo": "9234567",
-#     "flag": "Marshall Islands",
-#     "ship_type": "Oil Tanker",
-#     "lat": 25.276,
-#     "lon": 55.296,
-#     "speed": 14.9,
-#     "course": 120,
-#     "destination": "SINGAPORE",
-#     "status": "Under way using engine",
-#     "last_update": "2026-03-23T16:00:00Z"
-#   }
-# ]
+AISSTREAM_WS_URL = "wss://stream.aisstream.io/v0/stream"
 
 TANKER_TYPES = [
     "Tanker",
@@ -116,49 +98,21 @@ DEMO_VESSELS = [
         "status": "Under way using engine",
         "last_update": "2026-03-23T16:06:00Z",
     },
-    {
-        "name": "STRAIT RUNNER",
-        "mmsi": "525004321",
-        "imo": "9678901",
-        "flag": "Indonesia",
-        "ship_type": "LNG Tanker",
-        "lat": 2.5,
-        "lon": 101.6,
-        "speed": 13.1,
-        "course": 140,
-        "destination": "JAPAN",
-        "status": "Under way using engine",
-        "last_update": "2026-03-23T16:07:00Z",
-    },
-    {
-        "name": "CANAL TRANSIT",
-        "mmsi": "351009876",
-        "imo": "9789012",
-        "flag": "Panama",
-        "ship_type": "Bulk Carrier",
-        "lat": 9.1,
-        "lon": -79.7,
-        "speed": 7.2,
-        "course": 270,
-        "destination": "BALBOA",
-        "status": "Restricted manoeuverability",
-        "last_update": "2026-03-23T16:08:00Z",
-    },
 ]
 
 # =========================================================
 # HELPERS
 # =========================================================
-def safe_str(value):
-    if value is None:
-        return ""
-    return str(value).strip()
-
 def get_secret(name, default=None):
     try:
         return st.secrets.get(name, default)
     except Exception:
         return default
+
+def safe_str(value):
+    if value is None:
+        return ""
+    return str(value).strip()
 
 def vessel_is_tanker(row):
     ship_type = safe_str(row.get("ship_type"))
@@ -170,10 +124,8 @@ def vessel_is_high_interest(row):
 
     if status in HIGH_INTEREST_STATUSES:
         return True
-
     if pd.notna(speed) and float(speed) >= 25:
         return True
-
     return False
 
 def in_bbox(lat, lon, bbox):
@@ -217,43 +169,87 @@ def popup_html(row):
     """
 
 # =========================================================
-# DATA LOADING
+# AISSTREAM LOADER
 # =========================================================
 @st.cache_data(ttl=120)
 def load_vessels():
-    marine_feed_url = get_secret("marine_feed_url")
+    aisstream_key = get_secret("aisstream_key")
 
-    if marine_feed_url:
-        response = requests.get(marine_feed_url, timeout=20)
-        response.raise_for_status()
-        data = response.json()
-        df = pd.DataFrame(data)
-        source = "live"
-    else:
+    if not aisstream_key:
         df = pd.DataFrame(DEMO_VESSELS)
         source = "demo"
+    else:
+        ws = create_connection(AISSTREAM_WS_URL, timeout=20)
 
-    if df.empty:
-        return df, source
+        subscribe_message = {
+            "APIKey": aisstream_key,
+            "BoundingBoxes": [[[-90, -180], [90, 180]]],
+            "FilterMessageTypes": ["PositionReport"],
+        }
 
-    numeric_cols = ["lat", "lon", "speed", "course"]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+        ws.send(json.dumps(subscribe_message))
 
-    df["is_tanker"] = df.apply(vessel_is_tanker, axis=1)
-    df["is_high_interest"] = df.apply(vessel_is_high_interest, axis=1)
+        rows = []
+        max_messages = 40
+
+        for _ in range(max_messages):
+            raw = ws.recv()
+            payload = json.loads(raw)
+
+            msg = payload.get("Message", {})
+            meta = payload.get("MetaData", {})
+
+            if "PositionReport" not in msg:
+                continue
+
+            report = msg["PositionReport"]
+
+            rows.append({
+                "name": meta.get("ShipName") or f"MMSI {meta.get('MMSI')}",
+                "mmsi": str(meta.get("MMSI", "")),
+                "imo": safe_str(meta.get("IMO")),
+                "flag": safe_str(meta.get("Flag")),
+                "ship_type": safe_str(meta.get("ShipType")),
+                "lat": report.get("Latitude"),
+                "lon": report.get("Longitude"),
+                "speed": report.get("Sog"),
+                "course": report.get("Cog"),
+                "destination": safe_str(meta.get("Destination")),
+                "status": safe_str(report.get("NavigationalStatus")),
+                "last_update": safe_str(meta.get("time_utc")),
+            })
+
+        ws.close()
+
+        df = pd.DataFrame(rows)
+        source = "live"
+
+        if df.empty:
+            raise RuntimeError("AISStream returned no vessel messages in the snapshot window.")
+
+    if not df.empty:
+        for col in ["lat", "lon", "speed", "course"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df["is_tanker"] = df.apply(vessel_is_tanker, axis=1)
+        df["is_high_interest"] = df.apply(vessel_is_high_interest, axis=1)
 
     return df, source
 
+# =========================================================
+# LOAD DATA
+# =========================================================
 data_error = None
 
 try:
     vessels_df, data_source = load_vessels()
     feed_ok = True
 except Exception as e:
-    vessels_df = pd.DataFrame()
-    data_source = "error"
+    vessels_df = pd.DataFrame(DEMO_VESSELS)
+    vessels_df["is_tanker"] = vessels_df.apply(vessel_is_tanker, axis=1)
+    vessels_df["is_high_interest"] = vessels_df.apply(vessel_is_high_interest, axis=1)
+    data_source = "demo"
     feed_ok = False
     data_error = str(e)
 
@@ -322,27 +318,27 @@ with c4:
     st.metric(f"{selected_region} vessels", len(chokepoint_df))
 
 with c5:
-    if feed_ok:
-        if data_source == "live":
-            st.success("Marine Feed Online")
-        else:
-            st.warning("Demo Feed Active")
+    if feed_ok and data_source == "live":
+        st.success("Marine Feed Online")
+    elif data_source == "demo":
+        st.warning("Demo Feed Active")
     else:
         st.error("Marine Feed Offline")
+
+if data_error:
+    st.warning(f"Live AIS snapshot unavailable, showing demo data instead: {data_error}")
 
 st.divider()
 
 # =========================================================
-# MAP + SIDE PANEL
+# MAP
 # =========================================================
 left, right = st.columns([2.2, 1])
 
 with left:
     st.subheader("Live Vessel Map")
 
-    if not feed_ok:
-        st.error(data_error)
-    elif map_df.empty:
+    if map_df.empty:
         st.info("No vessels match the current map filters.")
     else:
         coords_df = map_df.dropna(subset=["lat", "lon"]).copy()
@@ -396,7 +392,6 @@ with left:
 
 with right:
     st.subheader("Map Legend")
-
     st.markdown(
         """
 - 🔴 **Red** = high-interest vessel  
@@ -404,129 +399,76 @@ with right:
 - 🟢 **Green** = other visible vessel  
 """
     )
-
     st.caption("Direction lines show approximate current heading only.")
-
-    if selected_region != "Global":
-        st.info(f"Current regional focus: {selected_region}")
-
-    if data_source == "demo":
-        st.info("This page is currently using demo vessel data. Add `marine_feed_url` in Streamlit secrets later for a live JSON feed.")
 
 st.divider()
 
 # =========================================================
-# CHOKEPOINT SECTION
+# TABLES
 # =========================================================
 st.subheader(f"{selected_region} Traffic")
 
-if not feed_ok:
-    st.error(data_error)
-elif chokepoint_df.empty:
+if chokepoint_df.empty:
     st.info(f"No vessels are currently visible in {selected_region}.")
 else:
     choke_display = chokepoint_df[
         ["name", "flag", "ship_type", "speed", "destination", "status", "last_update"]
     ].copy()
 
-    choke_display = choke_display.rename(
-        columns={
-            "name": "Vessel",
-            "flag": "Flag",
-            "ship_type": "Type",
-            "speed": "Speed (kn)",
-            "destination": "Destination",
-            "status": "Status",
-            "last_update": "Last Update",
-        }
-    )
+    choke_display = choke_display.rename(columns={
+        "name": "Vessel",
+        "flag": "Flag",
+        "ship_type": "Type",
+        "speed": "Speed (kn)",
+        "destination": "Destination",
+        "status": "Status",
+        "last_update": "Last Update",
+    })
 
     st.dataframe(choke_display, use_container_width=True, hide_index=True)
 
 st.divider()
 
-# =========================================================
-# HIGH-INTEREST SECTION
-# =========================================================
 st.subheader("High-Interest Commercial Vessel Activity")
 
-if not feed_ok:
-    st.error(data_error)
-elif high_interest_df.empty:
+if high_interest_df.empty:
     st.success("No high-interest commercial vessel movements are currently flagged.")
 else:
     hi_display = high_interest_df[
         ["name", "flag", "ship_type", "speed", "destination", "status", "last_update"]
     ].copy()
 
-    hi_display = hi_display.rename(
-        columns={
-            "name": "Vessel",
-            "flag": "Flag",
-            "ship_type": "Type",
-            "speed": "Speed (kn)",
-            "destination": "Destination",
-            "status": "Status",
-            "last_update": "Last Update",
-        }
-    )
+    hi_display = hi_display.rename(columns={
+        "name": "Vessel",
+        "flag": "Flag",
+        "ship_type": "Type",
+        "speed": "Speed (kn)",
+        "destination": "Destination",
+        "status": "Status",
+        "last_update": "Last Update",
+    })
 
     st.dataframe(hi_display, use_container_width=True, hide_index=True)
 
 st.divider()
 
-# =========================================================
-# TANKER SECTION
-# =========================================================
 st.subheader("Tanker Traffic")
 
-if not feed_ok:
-    st.error(data_error)
-elif tanker_df.empty:
+if tanker_df.empty:
     st.info("No tanker traffic is currently visible.")
 else:
     tanker_display = tanker_df[
         ["name", "flag", "ship_type", "speed", "destination", "status", "last_update"]
     ].copy()
 
-    tanker_display = tanker_display.rename(
-        columns={
-            "name": "Vessel",
-            "flag": "Flag",
-            "ship_type": "Type",
-            "speed": "Speed (kn)",
-            "destination": "Destination",
-            "status": "Status",
-            "last_update": "Last Update",
-        }
-    )
+    tanker_display = tanker_display.rename(columns={
+        "name": "Vessel",
+        "flag": "Flag",
+        "ship_type": "Type",
+        "speed": "Speed (kn)",
+        "destination": "Destination",
+        "status": "Status",
+        "last_update": "Last Update",
+    })
 
     st.dataframe(tanker_display, use_container_width=True, hide_index=True)
-
-st.divider()
-
-# =========================================================
-# ANALYST SUMMARY
-# =========================================================
-st.subheader("Analyst Summary")
-
-if not feed_ok:
-    st.markdown(
-        f"""
-- The marine feed is currently unavailable.
-- Error returned by the upstream source: `{data_error}`
-- The page is online, but the vessel data source needs attention.
-"""
-    )
-else:
-    source_text = "live feed" if data_source == "live" else "demo feed"
-
-    st.markdown(
-        f"""
-- **{len(vessels_df)}** vessel records were loaded from the **{source_text}**.
-- **{len(tanker_df)}** vessels are currently categorized as tankers.
-- **{len(high_interest_df)}** vessels are currently flagged as high-interest.
-- **{len(chokepoint_df)}** vessels are currently visible in **{selected_region}**.
-- The map shows all visible civilian/commercial vessels by default unless filters are applied.
-"""
-    )
