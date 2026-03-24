@@ -1,9 +1,9 @@
 import math
 import streamlit as st
 import pandas as pd
+import requests
 import folium
 from streamlit_folium import st_folium
-from data_sources.flights import get_live_flights
 
 st.set_page_config(page_title="Flight Activity", layout="wide")
 
@@ -13,12 +13,167 @@ st.caption(
 )
 
 # =========================================================
-# DATA
+# CONFIG
+# =========================================================
+OPENSKY_STATES_URL = "https://opensky-network.org/api/states/all"
+
+GOV_MIL_COUNTRY_KEYWORDS = [
+    "united states",
+    "russia",
+    "china",
+    "united kingdom",
+    "france",
+    "germany",
+    "italy",
+    "turkey",
+    "israel",
+    "india",
+]
+
+GOV_MIL_CALLSIGN_PREFIXES = [
+    "RCH",
+    "MC",
+    "RRR",
+    "QID",
+    "ASY",
+    "CNV",
+    "GAF",
+    "IAM",
+    "HKY",
+    "NATO",
+]
+
+SQUAWK_MEANINGS = {
+    "7500": {
+        "label": "Hijack / unlawful interference",
+        "severity": "HIGH",
+    },
+    "7600": {
+        "label": "Radio failure",
+        "severity": "HIGH",
+    },
+    "7700": {
+        "label": "General emergency",
+        "severity": "HIGH",
+    },
+    "7400": {
+        "label": "UAS lost link",
+        "severity": "MEDIUM",
+    },
+}
+
+# =========================================================
+# HELPERS
+# =========================================================
+def safe_str(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+def classify_callsign(callsign: str) -> str:
+    cs = safe_str(callsign).upper()
+    if any(cs.startswith(prefix) for prefix in GOV_MIL_CALLSIGN_PREFIXES):
+        return "Likely government/military-related"
+    return "Unclassified by callsign"
+
+def classify_country(country: str) -> str:
+    c = safe_str(country).lower()
+    if any(k in c for k in GOV_MIL_COUNTRY_KEYWORDS):
+        return "Watched state/country"
+    return "Other / unknown"
+
+def heading_endpoint(lat, lon, bearing_deg, distance_deg=1.0):
+    if pd.isna(lat) or pd.isna(lon) or pd.isna(bearing_deg):
+        return None, None
+
+    radians = math.radians(float(bearing_deg))
+    dlat = distance_deg * math.cos(radians)
+    dlon = distance_deg * math.sin(radians)
+    return lat + dlat, lon + dlon
+
+def marker_color(row):
+    if row.get("is_emergency_squawk") is True:
+        return "red"
+    if (
+        row.get("gov_mil_callsign_flag") == "Likely government/military-related"
+        or row.get("country_watch_flag") == "Watched state/country"
+    ):
+        return "blue"
+    return "green"
+
+def build_popup(row):
+    callsign = row.get("callsign") or "Unknown"
+    country = row.get("origin_country") or "Unknown"
+    squawk = row.get("squawk") or "None"
+    meaning = row.get("squawk_label") or "None"
+    altitude = row.get("baro_altitude")
+    velocity = row.get("velocity")
+    gov_flag = row.get("gov_mil_callsign_flag") or "None"
+    country_flag = row.get("country_watch_flag") or "None"
+
+    altitude_text = f"{int(altitude):,} m" if pd.notna(altitude) else "Unknown"
+    velocity_text = f"{int(velocity):,} m/s" if pd.notna(velocity) else "Unknown"
+
+    return f"""
+    <b>Callsign:</b> {callsign}<br>
+    <b>Origin Country:</b> {country}<br>
+    <b>Squawk:</b> {squawk}<br>
+    <b>Meaning:</b> {meaning}<br>
+    <b>Altitude:</b> {altitude_text}<br>
+    <b>Velocity:</b> {velocity_text}<br>
+    <b>Callsign Heuristic:</b> {gov_flag}<br>
+    <b>Country Heuristic:</b> {country_flag}
+    """
+
+# =========================================================
+# DATA LOADING
 # =========================================================
 @st.cache_data(ttl=60)
 def load_flights():
-    return get_live_flights(provider="opensky")
+    response = requests.get(OPENSKY_STATES_URL, timeout=20)
+    response.raise_for_status()
+    payload = response.json()
 
+    states = payload.get("states") or []
+
+    rows = []
+    for s in states:
+        rows.append(
+            {
+                "icao24": s[0],
+                "callsign": safe_str(s[1]),
+                "origin_country": safe_str(s[2]),
+                "time_position": s[3],
+                "last_contact": s[4],
+                "longitude": s[5],
+                "latitude": s[6],
+                "baro_altitude": s[7],
+                "on_ground": s[8],
+                "velocity": s[9],
+                "true_track": s[10],
+                "vertical_rate": s[11],
+                "geo_altitude": s[13],
+                "squawk": safe_str(s[14]),
+                "spi": s[15],
+                "position_source": s[16],
+                "category": s[17] if len(s) > 17 else None,
+            }
+        )
+
+    df = pd.DataFrame(rows)
+
+    if not df.empty:
+        df["gov_mil_callsign_flag"] = df["callsign"].apply(classify_callsign)
+        df["country_watch_flag"] = df["origin_country"].apply(classify_country)
+        df["is_emergency_squawk"] = df["squawk"].isin(SQUAWK_MEANINGS.keys())
+        df["squawk_label"] = df["squawk"].apply(
+            lambda x: SQUAWK_MEANINGS[x]["label"] if x in SQUAWK_MEANINGS else ""
+        )
+        df["squawk_severity"] = df["squawk"].apply(
+            lambda x: SQUAWK_MEANINGS[x]["severity"] if x in SQUAWK_MEANINGS else "LOW"
+        )
+
+    return df
 
 data_error = None
 
@@ -103,61 +258,7 @@ with c4:
 st.divider()
 
 # =========================================================
-# HELPERS
-# =========================================================
-def marker_color(row):
-    if row.get("is_emergency_squawk") is True:
-        return "red"
-    if (
-        row.get("gov_mil_callsign_flag") == "Likely government/military-related"
-        or row.get("country_watch_flag") == "Watched state/country"
-    ):
-        return "blue"
-    return "green"
-
-
-def build_popup(row):
-    callsign = row.get("callsign") or "Unknown"
-    country = row.get("origin_country") or "Unknown"
-    squawk = row.get("squawk") or "None"
-    meaning = row.get("squawk_label") or "None"
-    altitude = row.get("baro_altitude")
-    velocity = row.get("velocity")
-    gov_flag = row.get("gov_mil_callsign_flag") or "None"
-    country_flag = row.get("country_watch_flag") or "None"
-
-    altitude_text = f"{int(altitude):,} m" if pd.notna(altitude) else "Unknown"
-    velocity_text = f"{int(velocity):,} m/s" if pd.notna(velocity) else "Unknown"
-
-    return f"""
-    <b>Callsign:</b> {callsign}<br>
-    <b>Origin Country:</b> {country}<br>
-    <b>Squawk:</b> {squawk}<br>
-    <b>Meaning:</b> {meaning}<br>
-    <b>Altitude:</b> {altitude_text}<br>
-    <b>Velocity:</b> {velocity_text}<br>
-    <b>Callsign Heuristic:</b> {gov_flag}<br>
-    <b>Country Heuristic:</b> {country_flag}
-    """
-
-
-def heading_endpoint(lat, lon, bearing_deg, distance_deg=1.2):
-    """
-    Simple visual heading line.
-    This is NOT a true route history.
-    """
-    if pd.isna(lat) or pd.isna(lon) or pd.isna(bearing_deg):
-        return None, None
-
-    radians = math.radians(float(bearing_deg))
-    dlat = distance_deg * math.cos(radians)
-    dlon = distance_deg * math.sin(radians)
-
-    return lat + dlat, lon + dlon
-
-
-# =========================================================
-# MAIN MAP + SIDE PANEL
+# MAP + SIDE PANEL
 # =========================================================
 left, right = st.columns([2.2, 1])
 
@@ -218,7 +319,6 @@ with left:
 
 with right:
     st.subheader("Map Legend")
-
     st.markdown(
         """
 - 🔴 **Red** = emergency squawk  
@@ -226,10 +326,7 @@ with right:
 - 🟢 **Green** = other visible flights  
 """
     )
-
-    st.caption(
-        "Direction lines show approximate current heading only. They are not full route histories."
-    )
+    st.caption("Direction lines show approximate current heading only. They are not full route histories.")
 
     if not emergency_df.empty:
         st.markdown("**Active emergency examples**")
