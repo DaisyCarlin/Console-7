@@ -976,7 +976,7 @@ st.markdown(
     """
     <div class="hero-card">
         <div class="hero-kicker">LIVE AIRSPACE SURVEILLANCE</div>
-        <h1 class="hero-title">SkyScope Radar</h1>
+        <h1 class="hero-title">Flight Activity</h1>
         <p class="hero-copy">
             
     </div>
