@@ -10,7 +10,7 @@ from folium.features import DivIcon
 from folium.plugins import Fullscreen, MeasureControl, MousePosition
 from streamlit_folium import st_folium
 
-st.set_page_config(page_title="SkyScope Radar", layout="wide")
+st.set_page_config(page_title="Flight Activity", layout="wide")
 
 OPENSKY_STATES_URL = "https://opensky-network.org/api/states/all"
 REQUEST_HEADERS = {"User-Agent": "SkyScopeRadar/1.0"}
