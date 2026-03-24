@@ -955,11 +955,24 @@ for region_row in [region_names[:3], region_names[3:]]:
                 st.rerun()
 
 st.markdown("")
+with st.sidebar:
+    st.markdown("### Live Feed Access")
+    api_key_input = st.text_input(
+        "AISStream API key",
+        key="marine_api_key_input",
+        type="password",
+        placeholder="Paste your live AISStream key",
+        help="Used for live regional AIS snapshots. You can also provide aisstream_key in Streamlit secrets.",
+    ).strip()
+    st.session_state["marine_api_key"] = api_key_input
+    st.toggle(
+        "Allow demo fallback if live feed fails",
+        key="marine_allow_demo_fallback",
+    )
 
 
-
-st.markdown("### Region Controls")
-selected_region = st.selectbox(
+    st.markdown("### Region Controls")
+    selected_region = st.selectbox(
         "Continent",
         list(CONTINENT_BOXES.keys()),
         key="marine_region_picker",
