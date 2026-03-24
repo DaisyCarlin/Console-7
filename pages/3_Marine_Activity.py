@@ -6,29 +6,30 @@ import folium
 from streamlit_folium import st_folium
 from websocket import create_connection
 
-st.set_page_config(page_title="Marine Activity", layout="wide")
+st.set_page_config(page_title="Abnormal Marine Activity", layout="wide")
 
-st.title("Marine Activity Monitor")
-st.caption("Open-source maritime monitoring for commercial shipping, tanker flows, and chokepoint activity.")
+st.title("Abnormal Marine Activity")
+st.caption("Open-source monitoring for high-interest commercial vessel behavior, tanker traffic, and chokepoint activity.")
 
 # =========================================================
 # CONFIG
 # =========================================================
 AISSTREAM_WS_URL = "wss://stream.aisstream.io/v0/stream"
 
-TANKER_TYPES = [
-    "Tanker",
-    "Oil Tanker",
-    "LNG Tanker",
-    "Chemical Tanker",
-    "Gas Tanker",
+TANKER_KEYWORDS = [
+    "tanker",
+    "oil",
+    "lng",
+    "gas",
+    "chemical",
 ]
 
-HIGH_INTEREST_STATUSES = [
-    "Not under command",
-    "Restricted manoeuverability",
-    "Constrained by her draught",
-    "Aground",
+ABNORMAL_STATUS_KEYWORDS = [
+    "not under command",
+    "restricted manoeuverability",
+    "restricted maneuverability",
+    "constrained by her draught",
+    "aground",
 ]
 
 CHOKEPOINTS = {
@@ -98,6 +99,34 @@ DEMO_VESSELS = [
         "status": "Under way using engine",
         "last_update": "2026-03-23T16:06:00Z",
     },
+    {
+        "name": "STRAIT RUNNER",
+        "mmsi": "525004321",
+        "imo": "9678901",
+        "flag": "Indonesia",
+        "ship_type": "LNG Tanker",
+        "lat": 2.5,
+        "lon": 101.6,
+        "speed": 13.1,
+        "course": 140,
+        "destination": "JAPAN",
+        "status": "Under way using engine",
+        "last_update": "2026-03-23T16:07:00Z",
+    },
+    {
+        "name": "CANAL TRANSIT",
+        "mmsi": "351009876",
+        "imo": "9789012",
+        "flag": "Panama",
+        "ship_type": "Bulk Carrier",
+        "lat": 9.1,
+        "lon": -79.7,
+        "speed": 7.2,
+        "course": 270,
+        "destination": "",
+        "status": "Restricted manoeuverability",
+        "last_update": "2026-03-23T16:08:00Z",
+    },
 ]
 
 # =========================================================
@@ -113,20 +142,6 @@ def safe_str(value):
     if value is None:
         return ""
     return str(value).strip()
-
-def vessel_is_tanker(row):
-    ship_type = safe_str(row.get("ship_type"))
-    return ship_type in TANKER_TYPES
-
-def vessel_is_high_interest(row):
-    status = safe_str(row.get("status"))
-    speed = row.get("speed")
-
-    if status in HIGH_INTEREST_STATUSES:
-        return True
-    if pd.notna(speed) and float(speed) >= 25:
-        return True
-    return False
 
 def in_bbox(lat, lon, bbox):
     if bbox is None:
@@ -147,8 +162,50 @@ def heading_endpoint(lat, lon, bearing_deg, distance_deg=0.8):
     dlon = distance_deg * math.sin(radians)
     return lat + dlat, lon + dlon
 
+def is_tanker(row):
+    ship_type = safe_str(row.get("ship_type")).lower()
+    name = safe_str(row.get("name")).lower()
+    return any(k in ship_type for k in TANKER_KEYWORDS) or any(k in name for k in TANKER_KEYWORDS)
+
+def is_abnormal_status(row):
+    status = safe_str(row.get("status")).lower()
+    return any(k in status for k in ABNORMAL_STATUS_KEYWORDS)
+
+def is_missing_destination(row):
+    return safe_str(row.get("destination")) == ""
+
+def is_high_speed(row):
+    speed = row.get("speed")
+    return pd.notna(speed) and float(speed) >= 25
+
+def is_in_chokepoint(row):
+    lat = row.get("lat")
+    lon = row.get("lon")
+    for name, bbox in CHOKEPOINTS.items():
+        if name == "Global":
+            continue
+        if in_bbox(lat, lon, bbox):
+            return True
+    return False
+
+def abnormal_reason(row):
+    reasons = []
+
+    if row.get("is_tanker"):
+        reasons.append("tanker / energy shipping")
+    if row.get("is_high_speed"):
+        reasons.append("unusually high speed")
+    if row.get("is_abnormal_status"):
+        reasons.append("abnormal navigational status")
+    if row.get("is_missing_destination"):
+        reasons.append("missing destination")
+    if row.get("is_in_chokepoint"):
+        reasons.append("operating in major chokepoint")
+
+    return ", ".join(reasons) if reasons else "none"
+
 def marker_color(row):
-    if row.get("is_high_interest") is True:
+    if row.get("is_abnormal") is True:
         return "red"
     if row.get("is_tanker") is True:
         return "orange"
@@ -165,11 +222,12 @@ def popup_html(row):
     <b>Course:</b> {safe_str(row.get("course"))}<br>
     <b>Status:</b> {safe_str(row.get("status"))}<br>
     <b>Destination:</b> {safe_str(row.get("destination"))}<br>
+    <b>Abnormal Reason:</b> {safe_str(row.get("abnormal_reason"))}<br>
     <b>Last Update:</b> {safe_str(row.get("last_update"))}
     """
 
 # =========================================================
-# AISSTREAM LOADER
+# LOADER
 # =========================================================
 @st.cache_data(ttl=120)
 def load_vessels():
@@ -190,7 +248,7 @@ def load_vessels():
         ws.send(json.dumps(subscribe_message))
 
         rows = []
-        max_messages = 40
+        max_messages = 80
 
         for _ in range(max_messages):
             raw = ws.recv()
@@ -232,13 +290,18 @@ def load_vessels():
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        df["is_tanker"] = df.apply(vessel_is_tanker, axis=1)
-        df["is_high_interest"] = df.apply(vessel_is_high_interest, axis=1)
+        df["is_tanker"] = df.apply(is_tanker, axis=1)
+        df["is_high_speed"] = df.apply(is_high_speed, axis=1)
+        df["is_abnormal_status"] = df.apply(is_abnormal_status, axis=1)
+        df["is_missing_destination"] = df.apply(is_missing_destination, axis=1)
+        df["is_in_chokepoint"] = df.apply(is_in_chokepoint, axis=1)
+        df["abnormal_reason"] = df.apply(abnormal_reason, axis=1)
+        df["is_abnormal"] = df["abnormal_reason"] != "none"
 
     return df, source
 
 # =========================================================
-# LOAD DATA
+# LOAD
 # =========================================================
 data_error = None
 
@@ -247,11 +310,20 @@ try:
     feed_ok = True
 except Exception as e:
     vessels_df = pd.DataFrame(DEMO_VESSELS)
-    vessels_df["is_tanker"] = vessels_df.apply(vessel_is_tanker, axis=1)
-    vessels_df["is_high_interest"] = vessels_df.apply(vessel_is_high_interest, axis=1)
     data_source = "demo"
     feed_ok = False
     data_error = str(e)
+
+    for col in ["lat", "lon", "speed", "course"]:
+        vessels_df[col] = pd.to_numeric(vessels_df[col], errors="coerce")
+
+    vessels_df["is_tanker"] = vessels_df.apply(is_tanker, axis=1)
+    vessels_df["is_high_speed"] = vessels_df.apply(is_high_speed, axis=1)
+    vessels_df["is_abnormal_status"] = vessels_df.apply(is_abnormal_status, axis=1)
+    vessels_df["is_missing_destination"] = vessels_df.apply(is_missing_destination, axis=1)
+    vessels_df["is_in_chokepoint"] = vessels_df.apply(is_in_chokepoint, axis=1)
+    vessels_df["abnormal_reason"] = vessels_df.apply(abnormal_reason, axis=1)
+    vessels_df["is_abnormal"] = vessels_df["abnormal_reason"] != "none"
 
 # =========================================================
 # FILTERS
@@ -267,7 +339,7 @@ with f2:
     map_show_tankers_only = st.checkbox("Map: tankers only", value=False)
 
 with f3:
-    map_show_high_interest_only = st.checkbox("Map: high-interest only", value=False)
+    map_show_abnormal_only = st.checkbox("Map: abnormal only", value=True)
 
 with f4:
     show_heading_lines = st.checkbox("Show direction lines", value=True)
@@ -281,25 +353,20 @@ if not map_df.empty:
     if map_show_tankers_only:
         map_df = map_df[map_df["is_tanker"] == True]
 
-    if map_show_high_interest_only:
-        map_df = map_df[map_df["is_high_interest"] == True]
+    if map_show_abnormal_only:
+        map_df = map_df[map_df["is_abnormal"] == True]
 
 # =========================================================
 # DERIVED TABLES
 # =========================================================
-tanker_df = pd.DataFrame()
-high_interest_df = pd.DataFrame()
-chokepoint_df = pd.DataFrame()
+tanker_df = vessels_df[vessels_df["is_tanker"] == True].copy() if not vessels_df.empty else pd.DataFrame()
+abnormal_df = vessels_df[vessels_df["is_abnormal"] == True].copy() if not vessels_df.empty else pd.DataFrame()
 
-if not vessels_df.empty:
-    tanker_df = vessels_df[vessels_df["is_tanker"] == True].copy()
-    high_interest_df = vessels_df[vessels_df["is_high_interest"] == True].copy()
-
-    bbox = CHOKEPOINTS[selected_region]
-    chokepoint_df = vessels_df[vessels_df.apply(lambda r: in_bbox(r.get("lat"), r.get("lon"), bbox), axis=1)].copy()
+bbox = CHOKEPOINTS[selected_region]
+regional_df = vessels_df[vessels_df.apply(lambda r: in_bbox(r.get("lat"), r.get("lon"), bbox), axis=1)].copy() if not vessels_df.empty else pd.DataFrame()
 
 # =========================================================
-# STATUS CARDS
+# STATUS
 # =========================================================
 st.subheader("System Status")
 
@@ -307,16 +374,12 @@ c1, c2, c3, c4, c5 = st.columns(5)
 
 with c1:
     st.metric("Vessels loaded", len(vessels_df))
-
 with c2:
     st.metric("Tankers", len(tanker_df))
-
 with c3:
-    st.metric("High-interest vessels", len(high_interest_df))
-
+    st.metric("Abnormal vessels", len(abnormal_df))
 with c4:
-    st.metric(f"{selected_region} vessels", len(chokepoint_df))
-
+    st.metric(f"{selected_region} vessels", len(regional_df))
 with c5:
     if feed_ok and data_source == "live":
         st.success("Marine Feed Online")
@@ -327,6 +390,25 @@ with c5:
 
 if data_error:
     st.warning(f"Live AIS snapshot unavailable, showing demo data instead: {data_error}")
+
+st.divider()
+
+# =========================================================
+# WHAT QUALIFIES AS ABNORMAL
+# =========================================================
+st.subheader("What Qualifies as Abnormal Activity?")
+
+st.markdown("""
+This page flags **abnormal marine activity** using public commercial shipping signals. A vessel may be marked abnormal when one or more of these apply:
+
+- **Unusually high speed** for a merchant vessel
+- **Abnormal navigational status**, such as not under command, restricted manoeuverability, constrained by draught, or aground
+- **Missing destination**
+- **Operation inside a major chokepoint**
+- **Tanker / energy shipping relevance**, especially when combined with one of the above
+
+These are **signal-based flags**, not proof of wrongdoing.
+""")
 
 st.divider()
 
@@ -392,66 +474,72 @@ with left:
 
 with right:
     st.subheader("Map Legend")
-    st.markdown(
-        """
-- 🔴 **Red** = high-interest vessel  
-- 🟠 **Orange** = tanker  
-- 🟢 **Green** = other visible vessel  
-"""
-    )
+    st.markdown("""
+- 🔴 **Red** = abnormal vessel
+- 🟠 **Orange** = tanker
+- 🟢 **Green** = other visible vessel
+""")
     st.caption("Direction lines show approximate current heading only.")
 
 st.divider()
 
 # =========================================================
-# TABLES
+# REGIONAL TRAFFIC
 # =========================================================
 st.subheader(f"{selected_region} Traffic")
 
-if chokepoint_df.empty:
+if regional_df.empty:
     st.info(f"No vessels are currently visible in {selected_region}.")
 else:
-    choke_display = chokepoint_df[
-        ["name", "flag", "ship_type", "speed", "destination", "status", "last_update"]
+    regional_display = regional_df[
+        ["name", "flag", "ship_type", "speed", "destination", "status", "abnormal_reason", "last_update"]
     ].copy()
 
-    choke_display = choke_display.rename(columns={
+    regional_display = regional_display.rename(columns={
         "name": "Vessel",
         "flag": "Flag",
         "ship_type": "Type",
         "speed": "Speed (kn)",
         "destination": "Destination",
         "status": "Status",
+        "abnormal_reason": "Abnormal Reason",
         "last_update": "Last Update",
     })
 
-    st.dataframe(choke_display, use_container_width=True, hide_index=True)
+    st.dataframe(regional_display, use_container_width=True, hide_index=True)
 
 st.divider()
 
-st.subheader("High-Interest Commercial Vessel Activity")
+# =========================================================
+# ABNORMAL SECTION
+# =========================================================
+st.subheader("Abnormal Commercial Vessel Activity")
 
-if high_interest_df.empty:
-    st.success("No high-interest commercial vessel movements are currently flagged.")
+if abnormal_df.empty:
+    st.success("No abnormal commercial vessel movements are currently flagged.")
 else:
-    hi_display = high_interest_df[
-        ["name", "flag", "ship_type", "speed", "destination", "status", "last_update"]
+    abnormal_display = abnormal_df[
+        ["name", "flag", "ship_type", "speed", "destination", "status", "abnormal_reason", "last_update"]
     ].copy()
 
-    hi_display = hi_display.rename(columns={
+    abnormal_display = abnormal_display.rename(columns={
         "name": "Vessel",
         "flag": "Flag",
         "ship_type": "Type",
         "speed": "Speed (kn)",
         "destination": "Destination",
         "status": "Status",
+        "abnormal_reason": "Abnormal Reason",
         "last_update": "Last Update",
     })
 
-    st.dataframe(hi_display, use_container_width=True, hide_index=True)
+    st.dataframe(abnormal_display, use_container_width=True, hide_index=True)
 
 st.divider()
 
+# =========================================================
+# TANKER SECTION
+# =========================================================
 st.subheader("Tanker Traffic")
 
 if tanker_df.empty:
@@ -472,3 +560,20 @@ else:
     })
 
     st.dataframe(tanker_display, use_container_width=True, hide_index=True)
+
+st.divider()
+
+# =========================================================
+# ANALYST SUMMARY
+# =========================================================
+st.subheader("Analyst Summary")
+
+source_text = "live feed" if feed_ok and data_source == "live" else "demo feed"
+
+st.markdown(f"""
+- **{len(vessels_df)}** vessel records were loaded from the **{source_text}**.
+- **{len(tanker_df)}** vessels are currently categorized as tankers.
+- **{len(abnormal_df)}** vessels are currently flagged for abnormal commercial activity.
+- **{len(regional_df)}** vessels are currently visible in **{selected_region}**.
+- Abnormal flags are based on **public movement and status signals**, not proof of wrongdoing.
+""")
