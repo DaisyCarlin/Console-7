@@ -521,9 +521,22 @@ st.subheader("Analyst Summary")
 
 source_text = "live AIS snapshot" if data_source == "live" else "demo fallback"
 
-st.markdown(f""")
-- **{len(vessels_df)}** vessel records were loaded from the **{source_text}**.
-- **{len(abnormal_df)}** vessels are currently flagged for abnormal commercial activity.
-- **{len(tanker_df)}** vessels are currently categorized as tankers.
-- The map shows vessels in **{loaded_region}** only.
-- Abnormal flags are based on **public movement and status signals**, not proof of wrongdoing.
+st.markdown(f"""
+/mount/src/console-7/pages/3_Marine_Activity.py:524                          
+
+  st.markdown(f"""                                                              
+# ---------- System Summary ----------
+
+st.markdown("### System Summary")
+
+source_text = "live AIS feed" if live_mode else "demo dataset"
+
+st.markdown(f"""
+- **{len(vessels_df)} vessels** loaded in the selected region.
+- **{len(abnormal_df)} vessels** flagged for abnormal commercial behaviour.
+- **{len(tanker_df)} vessels** classified as tankers.
+- Data source currently: **{source_text}**
+- Abnormal flags are based on publicly visible movement / status anomalies.
+""")
+              ▲                                                                 
+
