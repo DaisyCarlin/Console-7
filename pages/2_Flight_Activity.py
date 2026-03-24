@@ -13,7 +13,7 @@ from streamlit_folium import st_folium
 st.set_page_config(page_title="Flight Activity", layout="wide")
 
 OPENSKY_STATES_URL = "https://opensky-network.org/api/states/all"
-REQUEST_HEADERS = {"User-Agent": "SkyScopeRadar/1.0"}
+REQUEST_HEADERS = {"User-Agent": "FlightActivity/1.0"}
 TRAIL_RETENTION_SECONDS = 30 * 60
 TRAIL_STORE_LIMIT = 14
 DEFAULT_MAP_RENDER_LIMIT = 350
