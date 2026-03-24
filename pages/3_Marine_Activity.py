@@ -1,6 +1,7 @@
 import html
 import json
 import math
+import os
 import time
 
 import folium
@@ -380,6 +381,23 @@ def safe_str(value):
     return str(value).strip()
 
 
+def get_aisstream_key():
+    candidates = [
+        st.session_state.get("marine_api_key"),
+        get_secret("aisstream_key"),
+        get_secret("AISSTREAM_API_KEY"),
+        get_secret("AISSTREAM_KEY"),
+        os.getenv("AISSTREAM_API_KEY"),
+        os.getenv("AISSTREAM_KEY"),
+    ]
+
+    for value in candidates:
+        token = safe_str(value)
+        if token:
+            return token
+    return ""
+
+
 def safe_heading(value):
     if pd.isna(value):
         return 0.0
@@ -573,12 +591,19 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     return prepared.reset_index(drop=True)
 
 
-def fetch_ais_region(region_name: str, max_messages: int = MAX_SNAPSHOT_MESSAGES, recv_timeout: int = REQUEST_TIMEOUT_SECONDS):
-    aisstream_key = get_secret("aisstream_key")
+def fetch_ais_region(
+    region_name: str,
+    max_messages: int = MAX_SNAPSHOT_MESSAGES,
+    recv_timeout: int = REQUEST_TIMEOUT_SECONDS,
+    allow_demo_fallback: bool = False,
+):
+    aisstream_key = get_aisstream_key()
 
     if not aisstream_key:
-        demo_df = prepare_df(pd.DataFrame(DEMO_VESSELS))
-        return demo_df, "demo", "No aisstream_key found in Streamlit secrets."
+        if allow_demo_fallback:
+            demo_df = prepare_df(pd.DataFrame(DEMO_VESSELS))
+            return demo_df, "demo", "No AISStream API key was found, so demo fallback was used."
+        return pd.DataFrame(), "needs_key", "Enter an AISStream API key in the sidebar to load live vessel data."
 
     ws = None
     try:
@@ -643,8 +668,10 @@ def fetch_ais_region(region_name: str, max_messages: int = MAX_SNAPSHOT_MESSAGES
         return live_df, "live", None
 
     except Exception as error:
-        demo_df = prepare_df(pd.DataFrame(DEMO_VESSELS))
-        return demo_df, "demo", str(error)
+        if allow_demo_fallback:
+            demo_df = prepare_df(pd.DataFrame(DEMO_VESSELS))
+            return demo_df, "demo", f"Live AIS snapshot failed, so demo fallback was used: {error}"
+        return pd.DataFrame(), "error", f"Live AIS snapshot failed: {error}"
 
     finally:
         if ws is not None:
@@ -667,6 +694,14 @@ def init_session_state():
         st.session_state["marine_loaded_at"] = None
     if "marine_selected_region" not in st.session_state:
         st.session_state["marine_selected_region"] = "Europe"
+    if "marine_region_picker" not in st.session_state:
+        st.session_state["marine_region_picker"] = st.session_state["marine_selected_region"]
+    if "marine_api_key" not in st.session_state:
+        st.session_state["marine_api_key"] = get_aisstream_key()
+    if "marine_api_key_input" not in st.session_state:
+        st.session_state["marine_api_key_input"] = st.session_state["marine_api_key"]
+    if "marine_allow_demo_fallback" not in st.session_state:
+        st.session_state["marine_allow_demo_fallback"] = False
 
 
 def render_metric_card(title, value, detail, accent):
@@ -702,13 +737,16 @@ def render_region_card(region_name: str, loaded_region):
 
 
 def load_region_snapshot(region_name: str):
-    df, source, error = fetch_ais_region(region_name)
+    df, source, error = fetch_ais_region(
+        region_name,
+        allow_demo_fallback=st.session_state.get("marine_allow_demo_fallback", False),
+    )
     st.session_state["marine_df"] = df
     st.session_state["marine_source"] = source
     st.session_state["marine_error"] = error
     st.session_state["marine_region"] = region_name
     st.session_state["marine_selected_region"] = region_name
-    st.session_state["marine_loaded_at"] = pd.Timestamp.utcnow()
+    st.session_state["marine_loaded_at"] = pd.Timestamp.utcnow() if not df.empty else None
 
 
 def apply_filters(df: pd.DataFrame, search_query: str, visible_categories, abnormal_only: bool, tankers_only: bool):
@@ -870,6 +908,7 @@ def make_feed_table(df: pd.DataFrame):
 inject_styles()
 init_session_state()
 loaded_region = st.session_state["marine_region"]
+st.session_state["marine_region_picker"] = st.session_state["marine_selected_region"]
 
 st.markdown(
     """
@@ -891,12 +930,15 @@ st.markdown(
         <div class="panel-title">Regional Access</div>
         <div class="panel-copy">
             Click a region below to load its AIS snapshot directly from the main workspace.
-            Sidebar controls remain available for search, filters, and map layers once a region is loaded.
+            Add your AISStream API key in the sidebar for live data, then use the region cards below to load a snapshot.
         </div>
     </div>
     """,
     unsafe_allow_html=True,
 )
+
+if not get_aisstream_key():
+    st.warning("No AISStream API key is configured. Enter one in the sidebar to load live vessel data.")
 
 region_names = list(CONTINENT_BOXES.keys())
 for region_row in [region_names[:3], region_names[3:]]:
@@ -915,12 +957,27 @@ for region_row in [region_names[:3], region_names[3:]]:
 st.markdown("")
 
 with st.sidebar:
+    st.markdown("### Live Feed Access")
+    api_key_input = st.text_input(
+        "AISStream API key",
+        key="marine_api_key_input",
+        type="password",
+        placeholder="Paste your live AISStream key",
+        help="Used for live regional AIS snapshots. You can also provide aisstream_key in Streamlit secrets.",
+    ).strip()
+    st.session_state["marine_api_key"] = api_key_input
+    st.toggle(
+        "Allow demo fallback if live feed fails",
+        key="marine_allow_demo_fallback",
+    )
+
     st.markdown("### Region Controls")
     selected_region = st.selectbox(
         "Continent",
         list(CONTINENT_BOXES.keys()),
-        key="marine_selected_region",
+        key="marine_region_picker",
     )
+    st.session_state["marine_selected_region"] = selected_region
     load_clicked = st.button("Load selected region", type="primary", use_container_width=True)
 
     if load_clicked:
@@ -953,7 +1010,9 @@ loaded_region = st.session_state["marine_region"]
 loaded_at = st.session_state["marine_loaded_at"]
 
 if vessels_df.empty:
-    st.info("Choose a region from the main page grid or use the sidebar to load a regional AIS snapshot.")
+    if data_error:
+        st.warning(data_error)
+    st.info("Choose a region from the main page grid or use the sidebar to load a live regional AIS snapshot.")
     st.stop()
 
 filtered_df = apply_filters(
@@ -981,6 +1040,10 @@ with metric_columns[4]:
         render_metric_card("Feed status", "Live", detail, "#39d98a")
     elif data_source == "demo":
         render_metric_card("Feed status", "Demo", "Fallback dataset is in use for this region", "#ff9e3d")
+    elif data_source == "needs_key":
+        render_metric_card("Feed status", "Key Needed", "Enter an AISStream API key to load live data", "#ff9e3d")
+    elif data_source == "error":
+        render_metric_card("Feed status", "Feed Error", "Live AIS snapshot could not be loaded", "#ff5f6d")
     else:
         render_metric_card("Feed status", "Idle", "No regional snapshot loaded", "#7dd3fc")
 
@@ -1021,7 +1084,16 @@ with map_col:
 
 with side_col:
     st.markdown("#### Regional brief")
-    source_text = "Live AIS snapshot" if data_source == "live" else "Demo fallback dataset"
+    if data_source == "live":
+        source_text = "Live AIS snapshot"
+    elif data_source == "demo":
+        source_text = "Demo fallback dataset"
+    elif data_source == "needs_key":
+        source_text = "Live feed key required"
+    elif data_source == "error":
+        source_text = "Live feed error"
+    else:
+        source_text = "No regional snapshot loaded"
     loaded_at_text = format_last_update(loaded_at.isoformat()) if loaded_at is not None else "Unknown"
     st.markdown(
         f"""
@@ -1052,7 +1124,10 @@ with side_col:
     )
 
     if data_error:
-        st.warning(f"Live AIS snapshot unavailable, showing demo data instead: {data_error}")
+        if data_source == "demo":
+            st.warning(data_error)
+        else:
+            st.warning(f"Live AIS status: {data_error}")
 
 tab_abnormal, tab_tankers, tab_feed = st.tabs(
     ["Abnormal Watch", "Tanker Traffic", "Vessel Feed"]
@@ -1085,6 +1160,6 @@ with tab_feed:
 st.markdown("---")
 st.caption(
     f"Loaded {len(vessels_df):,} vessel records from the "
-    f"{'live AIS snapshot' if data_source == 'live' else 'demo fallback'}, with "
+    f"{'live AIS snapshot' if data_source == 'live' else 'demo fallback' if data_source == 'demo' else 'current source state'}, with "
     f"{len(abnormal_df):,} abnormal signals and {len(tanker_df):,} tanker or energy-linked vessels in the current filtered view."
 )
