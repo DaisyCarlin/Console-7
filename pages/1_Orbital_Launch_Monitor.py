@@ -690,8 +690,7 @@ st.markdown(
         <div class="hero-kicker">LIVE ORBITAL OPERATIONS</div>
         <h1 class="hero-title">Orbital Launch Monitor</h1>
         <p class="hero-copy">
-            A professional launch watchboard for upcoming activity, recent failures, publicly signaled sensitive missions,
-            and official-document context on why a launch profile may be strategically sensitive.
+
         </p>
     </div>
     """,
