@@ -1,6 +1,8 @@
 streamlit
 pandas
 requests
+plotly
 folium
 streamlit-folium
+websocket-client
 
