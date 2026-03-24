@@ -8,71 +8,31 @@ from streamlit_folium import st_folium
 st.set_page_config(page_title="Marine Activity", layout="wide")
 
 st.title("Marine Activity Monitor")
-st.caption("Live open-source maritime monitoring for commercial, government, and military-linked vessel activity.")
+st.caption("Open-source maritime monitoring for commercial shipping, tanker flows, and chokepoint activity.")
 
 # =========================================================
 # CONFIG
 # =========================================================
 
 # Optional live feed:
-# If you later set st.secrets["marine_feed_url"], the page will try to load it.
+# If you later add st.secrets["marine_feed_url"], the page will try to load it.
 # Expected JSON format:
 # [
 #   {
-#     "name": "USNS EXAMPLE",
-#     "mmsi": "123456789",
-#     "imo": "1234567",
-#     "flag": "United States",
-#     "ship_type": "Military",
-#     "lat": 36.1,
-#     "lon": -5.3,
-#     "speed": 14.2,
-#     "course": 90,
-#     "destination": "Unknown",
+#     "name": "GLOBAL ENERGY",
+#     "mmsi": "538009999",
+#     "imo": "9234567",
+#     "flag": "Marshall Islands",
+#     "ship_type": "Oil Tanker",
+#     "lat": 25.276,
+#     "lon": 55.296,
+#     "speed": 14.9,
+#     "course": 120,
+#     "destination": "SINGAPORE",
 #     "status": "Under way using engine",
 #     "last_update": "2026-03-23T16:00:00Z"
 #   }
 # ]
-
-WATCH_FLAGS = [
-    "United States",
-    "United Kingdom",
-    "France",
-    "Germany",
-    "Italy",
-    "Turkey",
-    "India",
-    "China",
-    "Russia",
-    "Israel",
-]
-
-GOV_MIL_NAME_KEYWORDS = [
-    "navy",
-    "naval",
-    "coast guard",
-    "cgc",
-    "usns",
-    "uss",
-    "hms",
-    "fs ",
-    "rfa",
-    "pla",
-    "warship",
-    "destroyer",
-    "frigate",
-    "carrier",
-    "patrol",
-    "auxiliary",
-]
-
-GOV_MIL_TYPES = [
-    "Military",
-    "Naval",
-    "Patrol",
-    "Government",
-    "Coast Guard",
-]
 
 TANKER_TYPES = [
     "Tanker",
@@ -89,35 +49,17 @@ HIGH_INTEREST_STATUSES = [
     "Aground",
 ]
 
+CHOKEPOINTS = {
+    "Global": None,
+    "Suez": {"lat_min": 29.0, "lat_max": 31.8, "lon_min": 31.0, "lon_max": 33.5},
+    "Hormuz": {"lat_min": 25.0, "lat_max": 27.5, "lon_min": 55.0, "lon_max": 58.5},
+    "Bab el-Mandeb": {"lat_min": 11.0, "lat_max": 14.5, "lon_min": 42.0, "lon_max": 45.5},
+    "Malacca": {"lat_min": 0.5, "lat_max": 6.5, "lon_min": 96.0, "lon_max": 104.5},
+    "Panama": {"lat_min": 7.0, "lat_max": 10.5, "lon_min": -81.5, "lon_max": -78.0},
+    "Bosporus": {"lat_min": 40.8, "lat_max": 41.5, "lon_min": 28.8, "lon_max": 29.5},
+}
+
 DEMO_VESSELS = [
-    {
-        "name": "USNS ARCTIC",
-        "mmsi": "368123456",
-        "imo": "0000001",
-        "flag": "United States",
-        "ship_type": "Military",
-        "lat": 36.140,
-        "lon": -5.353,
-        "speed": 17.8,
-        "course": 85,
-        "destination": "Unknown",
-        "status": "Under way using engine",
-        "last_update": "2026-03-23T16:00:00Z",
-    },
-    {
-        "name": "HMS EXAMPLE",
-        "mmsi": "232111222",
-        "imo": "0000002",
-        "flag": "United Kingdom",
-        "ship_type": "Naval",
-        "lat": 50.367,
-        "lon": -4.134,
-        "speed": 12.4,
-        "course": 210,
-        "destination": "Portsmouth",
-        "status": "Under way using engine",
-        "last_update": "2026-03-23T16:01:00Z",
-    },
     {
         "name": "GLOBAL ENERGY",
         "mmsi": "538009999",
@@ -130,7 +72,7 @@ DEMO_VESSELS = [
         "course": 120,
         "destination": "SINGAPORE",
         "status": "Under way using engine",
-        "last_update": "2026-03-23T16:02:00Z",
+        "last_update": "2026-03-23T16:00:00Z",
     },
     {
         "name": "PACIFIC BRIDGE",
@@ -147,20 +89,6 @@ DEMO_VESSELS = [
         "last_update": "2026-03-23T16:03:00Z",
     },
     {
-        "name": "COAST GUARD 12",
-        "mmsi": "338007777",
-        "imo": "",
-        "flag": "United States",
-        "ship_type": "Coast Guard",
-        "lat": 29.760,
-        "lon": -94.830,
-        "speed": 22.5,
-        "course": 145,
-        "destination": "Patrol",
-        "status": "Restricted manoeuverability",
-        "last_update": "2026-03-23T16:04:00Z",
-    },
-    {
         "name": "MEDITERRANEAN STAR",
         "mmsi": "247006666",
         "imo": "9456789",
@@ -173,6 +101,48 @@ DEMO_VESSELS = [
         "destination": "Piraeus",
         "status": "Moored",
         "last_update": "2026-03-23T16:05:00Z",
+    },
+    {
+        "name": "RED SEA LINK",
+        "mmsi": "636001234",
+        "imo": "9567890",
+        "flag": "Liberia",
+        "ship_type": "Container Ship",
+        "lat": 12.8,
+        "lon": 43.3,
+        "speed": 16.8,
+        "course": 335,
+        "destination": "JEDDAH",
+        "status": "Under way using engine",
+        "last_update": "2026-03-23T16:06:00Z",
+    },
+    {
+        "name": "STRAIT RUNNER",
+        "mmsi": "525004321",
+        "imo": "9678901",
+        "flag": "Indonesia",
+        "ship_type": "LNG Tanker",
+        "lat": 2.5,
+        "lon": 101.6,
+        "speed": 13.1,
+        "course": 140,
+        "destination": "JAPAN",
+        "status": "Under way using engine",
+        "last_update": "2026-03-23T16:07:00Z",
+    },
+    {
+        "name": "CANAL TRANSIT",
+        "mmsi": "351009876",
+        "imo": "9789012",
+        "flag": "Panama",
+        "ship_type": "Bulk Carrier",
+        "lat": 9.1,
+        "lon": -79.7,
+        "speed": 7.2,
+        "course": 270,
+        "destination": "BALBOA",
+        "status": "Restricted manoeuverability",
+        "last_update": "2026-03-23T16:08:00Z",
     },
 ]
 
@@ -190,17 +160,6 @@ def get_secret(name, default=None):
     except Exception:
         return default
 
-def vessel_is_gov_mil(row):
-    name = safe_str(row.get("name")).lower()
-    flag = safe_str(row.get("flag"))
-    ship_type = safe_str(row.get("ship_type"))
-
-    name_match = any(k in name for k in GOV_MIL_NAME_KEYWORDS)
-    flag_match = flag in WATCH_FLAGS
-    type_match = ship_type in GOV_MIL_TYPES
-
-    return name_match or type_match or (flag_match and name_match)
-
 def vessel_is_tanker(row):
     ship_type = safe_str(row.get("ship_type"))
     return ship_type in TANKER_TYPES
@@ -217,6 +176,16 @@ def vessel_is_high_interest(row):
 
     return False
 
+def in_bbox(lat, lon, bbox):
+    if bbox is None:
+        return True
+    if pd.isna(lat) or pd.isna(lon):
+        return False
+    return (
+        bbox["lat_min"] <= lat <= bbox["lat_max"]
+        and bbox["lon_min"] <= lon <= bbox["lon_max"]
+    )
+
 def heading_endpoint(lat, lon, bearing_deg, distance_deg=0.8):
     if pd.isna(lat) or pd.isna(lon) or pd.isna(bearing_deg):
         return None, None
@@ -224,14 +193,11 @@ def heading_endpoint(lat, lon, bearing_deg, distance_deg=0.8):
     radians = math.radians(float(bearing_deg))
     dlat = distance_deg * math.cos(radians)
     dlon = distance_deg * math.sin(radians)
-
     return lat + dlat, lon + dlon
 
 def marker_color(row):
     if row.get("is_high_interest") is True:
         return "red"
-    if row.get("is_gov_mil") is True:
-        return "blue"
     if row.get("is_tanker") is True:
         return "orange"
     return "green"
@@ -275,7 +241,6 @@ def load_vessels():
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df["is_gov_mil"] = df.apply(vessel_is_gov_mil, axis=1)
     df["is_tanker"] = df.apply(vessel_is_tanker, axis=1)
     df["is_high_interest"] = df.apply(vessel_is_high_interest, axis=1)
 
@@ -300,7 +265,7 @@ st.subheader("Map Filters")
 f1, f2, f3, f4 = st.columns(4)
 
 with f1:
-    map_show_gov_mil_only = st.checkbox("Map: government / military-linked only", value=False)
+    selected_region = st.selectbox("Region", list(CHOKEPOINTS.keys()), index=0)
 
 with f2:
     map_show_tankers_only = st.checkbox("Map: tankers only", value=False)
@@ -314,8 +279,8 @@ with f4:
 map_df = vessels_df.copy()
 
 if not map_df.empty:
-    if map_show_gov_mil_only:
-        map_df = map_df[map_df["is_gov_mil"] == True]
+    bbox = CHOKEPOINTS[selected_region]
+    map_df = map_df[map_df.apply(lambda r: in_bbox(r.get("lat"), r.get("lon"), bbox), axis=1)]
 
     if map_show_tankers_only:
         map_df = map_df[map_df["is_tanker"] == True]
@@ -326,14 +291,16 @@ if not map_df.empty:
 # =========================================================
 # DERIVED TABLES
 # =========================================================
-gov_mil_df = pd.DataFrame()
 tanker_df = pd.DataFrame()
 high_interest_df = pd.DataFrame()
+chokepoint_df = pd.DataFrame()
 
 if not vessels_df.empty:
-    gov_mil_df = vessels_df[vessels_df["is_gov_mil"] == True].copy()
     tanker_df = vessels_df[vessels_df["is_tanker"] == True].copy()
     high_interest_df = vessels_df[vessels_df["is_high_interest"] == True].copy()
+
+    bbox = CHOKEPOINTS[selected_region]
+    chokepoint_df = vessels_df[vessels_df.apply(lambda r: in_bbox(r.get("lat"), r.get("lon"), bbox), axis=1)].copy()
 
 # =========================================================
 # STATUS CARDS
@@ -346,13 +313,13 @@ with c1:
     st.metric("Vessels loaded", len(vessels_df))
 
 with c2:
-    st.metric("Gov / military-linked", len(gov_mil_df))
-
-with c3:
     st.metric("Tankers", len(tanker_df))
 
-with c4:
+with c3:
     st.metric("High-interest vessels", len(high_interest_df))
+
+with c4:
+    st.metric(f"{selected_region} vessels", len(chokepoint_df))
 
 with c5:
     if feed_ok:
@@ -383,12 +350,19 @@ with left:
         if coords_df.empty:
             st.info("No coordinates available for the current map filters.")
         else:
-            center_lat = coords_df["lat"].mean()
-            center_lon = coords_df["lon"].mean()
+            if selected_region != "Global" and CHOKEPOINTS[selected_region] is not None:
+                bbox = CHOKEPOINTS[selected_region]
+                center_lat = (bbox["lat_min"] + bbox["lat_max"]) / 2
+                center_lon = (bbox["lon_min"] + bbox["lon_max"]) / 2
+                zoom_start = 6
+            else:
+                center_lat = coords_df["lat"].mean()
+                center_lon = coords_df["lon"].mean()
+                zoom_start = 3
 
             vessel_map = folium.Map(
                 location=[center_lat, center_lon],
-                zoom_start=3,
+                zoom_start=zoom_start,
                 tiles="CartoDB positron",
                 control_scale=True,
             )
@@ -426,7 +400,6 @@ with right:
     st.markdown(
         """
 - 🔴 **Red** = high-interest vessel  
-- 🔵 **Blue** = government / military-linked  
 - 🟠 **Orange** = tanker  
 - 🟢 **Green** = other visible vessel  
 """
@@ -434,30 +407,31 @@ with right:
 
     st.caption("Direction lines show approximate current heading only.")
 
+    if selected_region != "Global":
+        st.info(f"Current regional focus: {selected_region}")
+
     if data_source == "demo":
         st.info("This page is currently using demo vessel data. Add `marine_feed_url` in Streamlit secrets later for a live JSON feed.")
 
 st.divider()
 
 # =========================================================
-# GOV / MIL SECTION
+# CHOKEPOINT SECTION
 # =========================================================
-st.subheader("Government / Military-Linked Vessels")
+st.subheader(f"{selected_region} Traffic")
 
 if not feed_ok:
     st.error(data_error)
-elif gov_mil_df.empty:
-    st.info("No government / military-linked vessels are visible right now.")
+elif chokepoint_df.empty:
+    st.info(f"No vessels are currently visible in {selected_region}.")
 else:
-    gov_display = gov_mil_df[
-        ["name", "mmsi", "imo", "flag", "ship_type", "speed", "destination", "status", "last_update"]
+    choke_display = chokepoint_df[
+        ["name", "flag", "ship_type", "speed", "destination", "status", "last_update"]
     ].copy()
 
-    gov_display = gov_display.rename(
+    choke_display = choke_display.rename(
         columns={
             "name": "Vessel",
-            "mmsi": "MMSI",
-            "imo": "IMO",
             "flag": "Flag",
             "ship_type": "Type",
             "speed": "Speed (kn)",
@@ -467,19 +441,19 @@ else:
         }
     )
 
-    st.dataframe(gov_display, use_container_width=True, hide_index=True)
+    st.dataframe(choke_display, use_container_width=True, hide_index=True)
 
 st.divider()
 
 # =========================================================
 # HIGH-INTEREST SECTION
 # =========================================================
-st.subheader("High-Interest Vessel Activity")
+st.subheader("High-Interest Commercial Vessel Activity")
 
 if not feed_ok:
     st.error(data_error)
 elif high_interest_df.empty:
-    st.success("No high-interest vessel movements are currently flagged.")
+    st.success("No high-interest commercial vessel movements are currently flagged.")
 else:
     hi_display = high_interest_df[
         ["name", "flag", "ship_type", "speed", "destination", "status", "last_update"]
@@ -550,9 +524,9 @@ else:
     st.markdown(
         f"""
 - **{len(vessels_df)}** vessel records were loaded from the **{source_text}**.
-- **{len(gov_mil_df)}** vessels are currently categorized as government / military-linked.
 - **{len(tanker_df)}** vessels are currently categorized as tankers.
 - **{len(high_interest_df)}** vessels are currently flagged as high-interest.
-- The map shows all visible vessels by default unless filters are applied.
+- **{len(chokepoint_df)}** vessels are currently visible in **{selected_region}**.
+- The map shows all visible civilian/commercial vessels by default unless filters are applied.
 """
     )
