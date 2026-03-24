@@ -159,4 +159,4 @@ def is_tanker(row):
 
 def is_abnormal_status(row):
     status = safe_str(row.get("status")).lower()
-    return any(
+    return any()
