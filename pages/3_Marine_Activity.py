@@ -958,7 +958,7 @@ st.markdown("")
 
 
 
-    st.markdown("### Region Controls")
+st.markdown("### Region Controls")
     selected_region = st.selectbox(
         "Continent",
         list(CONTINENT_BOXES.keys()),
