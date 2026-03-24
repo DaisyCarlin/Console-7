@@ -524,12 +524,12 @@ source_text = "live AIS snapshot" if data_source == "live" else "demo fallback"
 
 st.markdown("### System Summary")
 
-source_text = "live AIS feed" if live_mode else "demo dataset"
+source_text = "live AIS feed" if data_source == "live" else "demo dataset"
 
 st.markdown(f"""
-- **{len(vessels_df)} vessels** loaded in the selected region  
-- **{len(abnormal_df)} vessels** flagged for abnormal commercial behaviour  
-- **{len(tanker_df)} vessels** classified as tankers  
-- Data source currently: **{source_text}**  
+- **{len(vessels_df)} vessels** loaded in the selected region
+- **{len(abnormal_df)} vessels** flagged for abnormal commercial behaviour
+- **{len(tanker_df)} vessels** classified as tankers
+- Data source currently: **{source_text}**
 - Abnormal flags are based on publicly visible movement / status anomalies.
 """)
