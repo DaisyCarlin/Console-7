@@ -691,7 +691,7 @@ st.markdown(
         <h1 class="hero-title">Orbital Launch Monitor</h1>
         <p class="hero-copy">
 
-        </p>
+        
     </div>
     """,
     unsafe_allow_html=True,
