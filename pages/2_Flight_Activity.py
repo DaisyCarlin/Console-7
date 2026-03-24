@@ -1,215 +1,29 @@
+import math
 import streamlit as st
 import pandas as pd
-import requests
-import plotly.express as px
+import folium
+from streamlit_folium import st_folium
+from data_sources.flights import get_live_flights
 
 st.set_page_config(page_title="Flight Activity", layout="wide")
 
 st.title("Flight Activity")
 st.caption(
-    "Open-source flight monitoring dashboard for public emergency squawks and government / military-related flight patterns."
+    "Open-source flight monitoring dashboard for live air traffic, emergency squawks, and public government / military-related heuristics."
 )
 
 # =========================================================
-# CONFIG
-# =========================================================
-OPENSKY_STATES_URL = "https://opensky-network.org/api/states/all"
-
-# Public-heuristic filters only
-GOV_MIL_COUNTRY_KEYWORDS = [
-    "united states",
-    "russia",
-    "china",
-    "united kingdom",
-    "france",
-    "germany",
-    "italy",
-    "turkey",
-    "israel",
-    "india",
-]
-
-GOV_MIL_CALLSIGN_PREFIXES = [
-    "RCH",   # US Air Mobility Command / transport patterns
-    "MC",    # various military-style prefixes
-    "RRR",   # RAF transport / tanker style patterns
-    "QID",   # RAF / UK military patterns sometimes seen publicly
-    "ASY",   # state / military style in some public datasets
-    "CNV",
-    "GAF",   # German Air Force style
-    "IAM",   # Italian Air Force style
-    "HKY",   # RAF / military support style
-    "NATO",
-]
-
-SQUAWK_MEANINGS = {
-    "7500": {
-        "label": "Hijack / unlawful interference",
-        "explanation": (
-            "This code is publicly associated with hijack or unlawful interference. "
-            "The app should treat this as a high-priority public alert, but not infer anything beyond the code itself."
-        ),
-        "severity": "HIGH",
-    },
-    "7600": {
-        "label": "Radio failure",
-        "explanation": (
-            "This code is publicly associated with a loss of two-way radio communications. "
-            "Possible causes include radio equipment failure or temporary communications issues."
-        ),
-        "severity": "HIGH",
-    },
-    "7700": {
-        "label": "General emergency",
-        "explanation": (
-            "This code is publicly associated with a general emergency. "
-            "Possible causes can range from medical or mechanical issues to operational emergencies."
-        ),
-        "severity": "HIGH",
-    },
-    "7400": {
-        "label": "UAS lost link",
-        "explanation": (
-            "This code may be used by certain unmanned aircraft systems when the control link is lost."
-        ),
-        "severity": "MEDIUM",
-    },
-}
-
-
-# =========================================================
-# HELPERS
-# =========================================================
-def safe_str(value):
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def classify_callsign(callsign: str) -> str:
-    cs = safe_str(callsign).upper()
-    if any(cs.startswith(prefix) for prefix in GOV_MIL_CALLSIGN_PREFIXES):
-        return "Likely government/military-related"
-    return "Unclassified by callsign"
-
-
-def classify_country(country: str) -> str:
-    c = safe_str(country).lower()
-    if any(k in c for k in GOV_MIL_COUNTRY_KEYWORDS):
-        return "Watched state/country"
-    return "Other / unknown"
-
-
-def public_flight_context(row) -> str:
-    """
-    Broad public-context note only.
-    No hidden-intent inference.
-    """
-    callsign = safe_str(row.get("callsign")).upper()
-    squawk = safe_str(row.get("squawk"))
-    on_ground = row.get("on_ground")
-    velocity = row.get("velocity")
-    altitude = row.get("baro_altitude")
-
-    notes = []
-
-    if callsign:
-        notes.append(f"Callsign observed: {callsign}.")
-    if squawk in SQUAWK_MEANINGS:
-        notes.append(SQUAWK_MEANINGS[squawk]["explanation"])
-    if on_ground is True:
-        notes.append("Aircraft appears to be on the ground.")
-    elif on_ground is False:
-        notes.append("Aircraft appears to be airborne.")
-    if pd.notna(altitude):
-        notes.append(f"Reported barometric altitude is about {int(altitude):,} m.")
-    if pd.notna(velocity):
-        notes.append(f"Reported groundspeed is about {int(velocity):,} m/s.")
-
-    if not notes:
-        return "No additional public context available."
-
-    return " ".join(notes)
-
-
-# =========================================================
-# DATA LOADING
+# DATA
 # =========================================================
 @st.cache_data(ttl=60)
-def get_live_states():
-    response = requests.get(OPENSKY_STATES_URL, timeout=20)
-    response.raise_for_status()
-    payload = response.json()
-
-    states = payload.get("states") or []
-
-    rows = []
-    for s in states:
-        # OpenSky state vector order used here:
-        # 0 icao24
-        # 1 callsign
-        # 2 origin_country
-        # 3 time_position
-        # 4 last_contact
-        # 5 longitude
-        # 6 latitude
-        # 7 baro_altitude
-        # 8 on_ground
-        # 9 velocity
-        # 10 true_track
-        # 11 vertical_rate
-        # 12 sensors
-        # 13 geo_altitude
-        # 14 squawk
-        # 15 spi
-        # 16 position_source
-        # 17 category
-        rows.append(
-            {
-                "icao24": s[0],
-                "callsign": safe_str(s[1]),
-                "origin_country": safe_str(s[2]),
-                "time_position": s[3],
-                "last_contact": s[4],
-                "longitude": s[5],
-                "latitude": s[6],
-                "baro_altitude": s[7],
-                "on_ground": s[8],
-                "velocity": s[9],
-                "true_track": s[10],
-                "vertical_rate": s[11],
-                "geo_altitude": s[13],
-                "squawk": safe_str(s[14]),
-                "spi": s[15],
-                "position_source": s[16],
-                "category": s[17] if len(s) > 17 else None,
-            }
-        )
-
-    df = pd.DataFrame(rows)
-
-    if not df.empty:
-        df["gov_mil_callsign_flag"] = df["callsign"].apply(classify_callsign)
-        df["country_watch_flag"] = df["origin_country"].apply(classify_country)
-        df["is_emergency_squawk"] = df["squawk"].isin(SQUAWK_MEANINGS.keys())
-        df["squawk_label"] = df["squawk"].apply(
-            lambda x: SQUAWK_MEANINGS[x]["label"] if x in SQUAWK_MEANINGS else ""
-        )
-        df["squawk_severity"] = df["squawk"].apply(
-            lambda x: SQUAWK_MEANINGS[x]["severity"] if x in SQUAWK_MEANINGS else "LOW"
-        )
-        df["public_context"] = df.apply(public_flight_context, axis=1)
-
-    return df
+def load_flights():
+    return get_live_flights(provider="opensky")
 
 
-# =========================================================
-# LOAD
-# =========================================================
 data_error = None
 
 try:
-    flights_df = get_live_states()
+    flights_df = load_flights()
 except Exception as e:
     flights_df = pd.DataFrame()
     data_error = str(e)
@@ -217,33 +31,52 @@ except Exception as e:
 # =========================================================
 # FILTERS
 # =========================================================
-st.subheader("Filters")
+st.subheader("Map Filters")
 
-f1, f2, f3 = st.columns(3)
+f1, f2, f3, f4 = st.columns(4)
 
 with f1:
-    show_emergency_only = st.checkbox("Emergency squawks only", value=True)
+    map_show_gov_mil_only = st.checkbox("Map: government / military-related only", value=False)
 
 with f2:
-    show_gov_mil_only = st.checkbox("Government / military-related only", value=False)
+    map_show_airborne_only = st.checkbox("Map: airborne only", value=True)
 
 with f3:
-    show_airborne_only = st.checkbox("Airborne only", value=True)
+    map_country_filter = st.text_input("Map: country contains", value="").strip().lower()
 
-filtered_df = flights_df.copy()
+with f4:
+    show_heading_lines = st.checkbox("Show direction lines", value=True)
 
-if not filtered_df.empty:
-    if show_emergency_only:
-        filtered_df = filtered_df[filtered_df["is_emergency_squawk"] == True]
+map_df = flights_df.copy()
 
-    if show_gov_mil_only:
-        filtered_df = filtered_df[
-            (filtered_df["gov_mil_callsign_flag"] == "Likely government/military-related")
-            | (filtered_df["country_watch_flag"] == "Watched state/country")
+if not map_df.empty:
+    if map_show_gov_mil_only:
+        map_df = map_df[
+            (map_df["gov_mil_callsign_flag"] == "Likely government/military-related")
+            | (map_df["country_watch_flag"] == "Watched state/country")
         ]
 
-    if show_airborne_only:
-        filtered_df = filtered_df[filtered_df["on_ground"] == False]
+    if map_show_airborne_only:
+        map_df = map_df[map_df["on_ground"] == False]
+
+    if map_country_filter:
+        map_df = map_df[
+            map_df["origin_country"].fillna("").str.lower().str.contains(map_country_filter, na=False)
+        ]
+
+# =========================================================
+# DERIVED TABLES
+# =========================================================
+emergency_df = pd.DataFrame()
+gov_mil_df = pd.DataFrame()
+
+if not flights_df.empty:
+    emergency_df = flights_df[flights_df["is_emergency_squawk"] == True].copy()
+
+    gov_mil_df = flights_df[
+        (flights_df["gov_mil_callsign_flag"] == "Likely government/military-related")
+        | (flights_df["country_watch_flag"] == "Watched state/country")
+    ].copy()
 
 # =========================================================
 # STATUS CARDS
@@ -256,17 +89,10 @@ with c1:
     st.metric("Flights loaded", len(flights_df))
 
 with c2:
-    emergency_count = int(flights_df["is_emergency_squawk"].sum()) if not flights_df.empty else 0
-    st.metric("Emergency squawks", emergency_count)
+    st.metric("Emergency squawks", len(emergency_df))
 
 with c3:
-    govmil_count = int(
-        (
-            (flights_df["gov_mil_callsign_flag"] == "Likely government/military-related")
-            | (flights_df["country_watch_flag"] == "Watched state/country")
-        ).sum()
-    ) if not flights_df.empty else 0
-    st.metric("Gov / military-related", govmil_count)
+    st.metric("Gov / military-related", len(gov_mil_df))
 
 with c4:
     if data_error:
@@ -277,98 +103,228 @@ with c4:
 st.divider()
 
 # =========================================================
-# MAP + EXPLANATION PANEL
+# HELPERS
 # =========================================================
-left, right = st.columns([1.5, 1])
+def marker_color(row):
+    if row.get("is_emergency_squawk") is True:
+        return "red"
+    if (
+        row.get("gov_mil_callsign_flag") == "Likely government/military-related"
+        or row.get("country_watch_flag") == "Watched state/country"
+    ):
+        return "blue"
+    return "green"
+
+
+def build_popup(row):
+    callsign = row.get("callsign") or "Unknown"
+    country = row.get("origin_country") or "Unknown"
+    squawk = row.get("squawk") or "None"
+    meaning = row.get("squawk_label") or "None"
+    altitude = row.get("baro_altitude")
+    velocity = row.get("velocity")
+    gov_flag = row.get("gov_mil_callsign_flag") or "None"
+    country_flag = row.get("country_watch_flag") or "None"
+
+    altitude_text = f"{int(altitude):,} m" if pd.notna(altitude) else "Unknown"
+    velocity_text = f"{int(velocity):,} m/s" if pd.notna(velocity) else "Unknown"
+
+    return f"""
+    <b>Callsign:</b> {callsign}<br>
+    <b>Origin Country:</b> {country}<br>
+    <b>Squawk:</b> {squawk}<br>
+    <b>Meaning:</b> {meaning}<br>
+    <b>Altitude:</b> {altitude_text}<br>
+    <b>Velocity:</b> {velocity_text}<br>
+    <b>Callsign Heuristic:</b> {gov_flag}<br>
+    <b>Country Heuristic:</b> {country_flag}
+    """
+
+
+def heading_endpoint(lat, lon, bearing_deg, distance_deg=1.2):
+    """
+    Simple visual heading line.
+    This is NOT a true route history.
+    """
+    if pd.isna(lat) or pd.isna(lon) or pd.isna(bearing_deg):
+        return None, None
+
+    radians = math.radians(float(bearing_deg))
+    dlat = distance_deg * math.cos(radians)
+    dlon = distance_deg * math.sin(radians)
+
+    return lat + dlat, lon + dlon
+
+
+# =========================================================
+# MAIN MAP + SIDE PANEL
+# =========================================================
+left, right = st.columns([2.2, 1])
 
 with left:
     st.subheader("Live Flight Map")
 
     if data_error:
         st.error(f"Flight data unavailable: {data_error}")
-    elif filtered_df.empty:
-        st.info("No flights match the current filters.")
+    elif map_df.empty:
+        st.info("No flights match the current map filters.")
     else:
-        map_df = filtered_df.dropna(subset=["latitude", "longitude"]).copy()
+        coords_df = map_df.dropna(subset=["latitude", "longitude"]).copy()
 
-        if map_df.empty:
-            st.info("No flight coordinates available for the current filters.")
+        if coords_df.empty:
+            st.info("No coordinates available for the current map filters.")
         else:
-            fig = px.scatter_geo(
-                map_df,
-                lat="latitude",
-                lon="longitude",
-                hover_name="callsign",
-                hover_data=["origin_country", "squawk", "squawk_label", "velocity", "baro_altitude"],
-                title="Filtered Live Flights",
+            center_lat = coords_df["latitude"].mean()
+            center_lon = coords_df["longitude"].mean()
+
+            flight_map = folium.Map(
+                location=[center_lat, center_lon],
+                zoom_start=4,
+                tiles="CartoDB positron",
+                control_scale=True,
             )
-            fig.update_traces(marker=dict(size=8))
-            fig.update_layout(height=520, margin=dict(l=0, r=0, t=50, b=0))
-            st.plotly_chart(fig, use_container_width=True)
+
+            for _, row in coords_df.iterrows():
+                lat = row["latitude"]
+                lon = row["longitude"]
+                color = marker_color(row)
+
+                folium.CircleMarker(
+                    location=[lat, lon],
+                    radius=5,
+                    color=color,
+                    fill=True,
+                    fill_opacity=0.85,
+                    popup=folium.Popup(build_popup(row), max_width=320),
+                    tooltip=row.get("callsign") or "Unknown",
+                ).add_to(flight_map)
+
+                if show_heading_lines and row.get("on_ground") is False:
+                    end_lat, end_lon = heading_endpoint(
+                        lat,
+                        lon,
+                        row.get("true_track"),
+                        distance_deg=1.0,
+                    )
+                    if end_lat is not None and end_lon is not None:
+                        folium.PolyLine(
+                            locations=[[lat, lon], [end_lat, end_lon]],
+                            color=color,
+                            weight=2,
+                            opacity=0.7,
+                        ).add_to(flight_map)
+
+            st_folium(flight_map, use_container_width=True, height=650)
 
 with right:
-    st.subheader("How the AI-style explanation works")
-    st.caption("These are broad public explanations, not factual determinations of cause or intent.")
+    st.subheader("Map Legend")
 
     st.markdown(
         """
-- **7500** → hijack / unlawful interference  
-- **7600** → radio failure  
-- **7700** → general emergency  
-- **7400** → UAS lost-link context in some cases  
-
-The dashboard only gives **plausible public explanations** based on the squawk code and visible flight context. It does **not** claim to know the real reason.
+- 🔴 **Red** = emergency squawk  
+- 🔵 **Blue** = government / military-related heuristic match  
+- 🟢 **Green** = other visible flights  
 """
     )
 
-    if not filtered_df.empty:
-        first_row = filtered_df.iloc[0]
-        st.markdown("**Example explanation**")
-        st.write(first_row.get("public_context", "No explanation available."))
+    st.caption(
+        "Direction lines show approximate current heading only. They are not full route histories."
+    )
+
+    if not emergency_df.empty:
+        st.markdown("**Active emergency examples**")
+        sample = emergency_df.head(5)[["callsign", "squawk", "squawk_label"]].copy()
+        sample = sample.rename(
+            columns={
+                "callsign": "Callsign",
+                "squawk": "Squawk",
+                "squawk_label": "Meaning",
+            }
+        )
+        st.dataframe(sample, use_container_width=True, hide_index=True)
+    else:
+        st.info("No active emergency squawks in the current feed.")
 
 st.divider()
 
 # =========================================================
-# SQUAWK TABLE
+# EMERGENCY EVENTS
 # =========================================================
-st.subheader("Emergency Squawk Watchlist")
+st.subheader("Emergency Squawk Events")
 
 if data_error:
     st.error(f"Flight feed unavailable: {data_error}")
-elif filtered_df.empty:
-    st.info("No flights match the current filters.")
+elif emergency_df.empty:
+    st.success("No emergency squawk events are currently visible.")
 else:
-    display_df = filtered_df[
+    emergency_display = emergency_df[
         [
             "callsign",
             "origin_country",
             "squawk",
             "squawk_label",
-            "gov_mil_callsign_flag",
-            "country_watch_flag",
             "on_ground",
             "velocity",
             "baro_altitude",
-            "public_context",
         ]
     ].copy()
 
-    display_df = display_df.rename(
+    emergency_display = emergency_display.rename(
         columns={
             "callsign": "Callsign",
             "origin_country": "Origin Country",
             "squawk": "Squawk",
             "squawk_label": "Meaning",
-            "gov_mil_callsign_flag": "Callsign Heuristic",
-            "country_watch_flag": "Country Heuristic",
             "on_ground": "On Ground",
             "velocity": "Velocity (m/s)",
             "baro_altitude": "Baro Altitude (m)",
-            "public_context": "Public Explanation",
         }
     )
 
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.dataframe(emergency_display, use_container_width=True, hide_index=True)
+
+st.divider()
+
+# =========================================================
+# GOV / MIL SECTION
+# =========================================================
+st.subheader("Government / Military-Related Flights")
+st.caption("This section uses public callsign and country heuristics only.")
+
+if data_error:
+    st.error(f"Flight feed unavailable: {data_error}")
+elif gov_mil_df.empty:
+    st.info("No flights matched the current public government / military heuristics.")
+else:
+    gov_display = gov_mil_df[
+        [
+            "callsign",
+            "origin_country",
+            "gov_mil_callsign_flag",
+            "country_watch_flag",
+            "squawk",
+            "squawk_label",
+            "on_ground",
+            "velocity",
+            "baro_altitude",
+        ]
+    ].copy()
+
+    gov_display = gov_display.rename(
+        columns={
+            "callsign": "Callsign",
+            "origin_country": "Origin Country",
+            "gov_mil_callsign_flag": "Callsign Heuristic",
+            "country_watch_flag": "Country Heuristic",
+            "squawk": "Squawk",
+            "squawk_label": "Meaning",
+            "on_ground": "On Ground",
+            "velocity": "Velocity (m/s)",
+            "baro_altitude": "Baro Altitude (m)",
+        }
+    )
+
+    st.dataframe(gov_display, use_container_width=True, hide_index=True)
 
 st.divider()
 
@@ -389,8 +345,9 @@ else:
     st.markdown(
         f"""
 - **{len(flights_df)}** live flight state records were loaded.
-- **{int(flights_df["is_emergency_squawk"].sum())}** flights are showing emergency squawk codes.
-- **{int(((flights_df["gov_mil_callsign_flag"] == "Likely government/military-related") | (flights_df["country_watch_flag"] == "Watched state/country")).sum())}** flights matched the public government / military heuristics.
-- The explanations shown for squawks are **broad public interpretations** based on FAA emergency code meanings and visible flight context, not confirmed causes.
+- **{len(emergency_df)}** flights are currently showing emergency squawk codes.
+- **{len(gov_mil_df)}** flights matched the public government / military heuristics.
+- The main map now shows **all matching live flights by default**.
+- Direction lines show **approximate current heading**, not full historical routes.
 """
     )
