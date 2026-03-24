@@ -521,7 +521,7 @@ st.subheader("Analyst Summary")
 
 source_text = "live AIS snapshot" if data_source == "live" else "demo fallback"
 
-st.markdown(f"""
+st.markdown(f""")
 - **{len(vessels_df)}** vessel records were loaded from the **{source_text}**.
 - **{len(abnormal_df)}** vessels are currently flagged for abnormal commercial activity.
 - **{len(tanker_df)}** vessels are currently categorized as tankers.
