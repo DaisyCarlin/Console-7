@@ -229,7 +229,7 @@ def prepare_df(df: pd.DataFrame) -> pd.DataFrame:
 # =========================================================
 # AIS LOADER
 # =========================================================
-def fetch_ais_region(region_name: str, max_messages: int = 30, recv_timeout: int = 8):
+def fetch_ais_region(region_name: str, max_messages: int = 60, recv_timeout: int = 20):
     aisstream_key = get_secret("aisstream_key")
 
     if not aisstream_key:
@@ -238,7 +238,7 @@ def fetch_ais_region(region_name: str, max_messages: int = 30, recv_timeout: int
 
     ws = None
     try:
-        ws = create_connection(AISSTREAM_WS_URL, timeout=10)
+        ws = create_connection(AISSTREAM_WS_URL, timeout=15)
         ws.settimeout(recv_timeout)
 
         subscribe_message = {
@@ -292,7 +292,7 @@ def fetch_ais_region(region_name: str, max_messages: int = 30, recv_timeout: int
             })
 
         if not rows:
-            raise RuntimeError("AISStream returned no vessel messages for this region in the snapshot window.")
+            raise RuntimeError("AISStream returned no vessel messages in the snapshot window.")
 
         live_df = prepare_df(pd.DataFrame(rows))
         return live_df, "live", None
@@ -334,10 +334,10 @@ with c1:
     selected_region = st.selectbox("Continent", list(CONTINENT_BOXES.keys()), index=2)
 
 with c2:
-    map_show_abnormal_only = st.checkbox("Map: abnormal only", value=False)
+    map_show_all = st.checkbox("Show all vessels", value=True)
 
 with c3:
-    map_show_tankers_only = st.checkbox("Map: tankers only", value=False)
+    map_show_abnormal_only = st.checkbox("Map: abnormal only", value=False)
 
 with c4:
     show_heading_lines = st.checkbox("Show direction lines", value=True)
@@ -366,11 +366,10 @@ if vessels_df.empty:
 
 map_df = vessels_df.copy()
 
-if map_show_abnormal_only:
+if not map_show_all and map_show_abnormal_only:
     map_df = map_df[map_df["is_abnormal"] == True]
-
-if map_show_tankers_only:
-    map_df = map_df[map_df["is_tanker"] == True]
+elif map_show_abnormal_only:
+    map_df = map_df[map_df["is_abnormal"] == True]
 
 abnormal_df = vessels_df[vessels_df["is_abnormal"] == True].copy()
 tanker_df = vessels_df[vessels_df["is_tanker"] == True].copy()
@@ -484,7 +483,7 @@ with right:
 - 🟢 **Green** = other visible vessel  
 """)
     st.caption("Direction lines show approximate current heading only.")
-    st.info("The page only loads the continent you click, which keeps it faster.")
+    st.info("Click a continent to load only that area, which keeps it faster.")
 
 st.divider()
 
@@ -516,32 +515,6 @@ else:
 st.divider()
 
 # =========================================================
-# TANKER TABLE
-# =========================================================
-st.subheader("Tanker Traffic")
-
-if tanker_df.empty:
-    st.info("No tanker traffic is currently visible.")
-else:
-    tanker_display = tanker_df[
-        ["name", "flag", "ship_type", "speed", "destination", "status", "last_update"]
-    ].copy()
-
-    tanker_display = tanker_display.rename(columns={
-        "name": "Vessel",
-        "flag": "Flag",
-        "ship_type": "Type",
-        "speed": "Speed (kn)",
-        "destination": "Destination",
-        "status": "Status",
-        "last_update": "Last Update",
-    })
-
-    st.dataframe(tanker_display, use_container_width=True, hide_index=True)
-
-st.divider()
-
-# =========================================================
 # ANALYST SUMMARY
 # =========================================================
 st.subheader("Analyst Summary")
@@ -552,6 +525,5 @@ st.markdown(f"""
 - **{len(vessels_df)}** vessel records were loaded from the **{source_text}**.
 - **{len(abnormal_df)}** vessels are currently flagged for abnormal commercial activity.
 - **{len(tanker_df)}** vessels are currently categorized as tankers.
-- The page only loads **the continent you selected**, which keeps it faster and more reliable.
+- The map shows vessels in **{loaded_region}** only.
 - Abnormal flags are based on **public movement and status signals**, not proof of wrongdoing.
-""")
