@@ -1,723 +1,396 @@
-import os
-import json
-import time
-import requests
 import streamlit as st
 import pandas as pd
+import requests
 import plotly.express as px
 
-try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
-except Exception:
-    OPENAI_AVAILABLE = False
+st.set_page_config(page_title="Flight Activity", layout="wide")
 
-
-st.set_page_config(page_title="Orbital Launch Monitor", layout="wide")
-
-st.title("Orbital Launch Monitor")
+st.title("Flight Activity")
 st.caption(
-    "A live dashboard for upcoming launches, recent failed launches, publicly labeled sensitive missions, and AI-assisted OSINT inference."
+    "Open-source flight monitoring dashboard for public emergency squawks and government / military-related flight patterns."
 )
 
-
-# =========================
+# =========================================================
 # CONFIG
-# =========================
+# =========================================================
+OPENSKY_STATES_URL = "https://opensky-network.org/api/states/all"
 
-SENSITIVE_KEYWORDS = [
-    "government/top secret",
-    "top secret",
-    "government",
-    "national security",
-    "military",
-    "reconnaissance",
-    "surveillance",
-    "classified",
-    "nrol",
-    "usa-",
-    "yaogan",
+# Public-heuristic filters only
+GOV_MIL_COUNTRY_KEYWORDS = [
+    "united states",
+    "russia",
+    "china",
+    "united kingdom",
+    "france",
+    "germany",
+    "italy",
+    "turkey",
+    "israel",
+    "india",
 ]
 
-WATCHED_PROVIDERS = [
-    "united launch alliance",
-    "northrop grumman",
-    "spacex",
-    "rocket lab",
-    "roscosmos",
+GOV_MIL_CALLSIGN_PREFIXES = [
+    "RCH",   # US Air Mobility Command / transport patterns
+    "MC",    # various military-style prefixes
+    "RRR",   # RAF transport / tanker style patterns
+    "QID",   # RAF / UK military patterns sometimes seen publicly
+    "ASY",   # state / military style in some public datasets
+    "CNV",
+    "GAF",   # German Air Force style
+    "IAM",   # Italian Air Force style
+    "HKY",   # RAF / military support style
+    "NATO",
 ]
 
-UPCOMING_LIMIT = 15
-RECENT_LIMIT = 40
-REQUEST_TIMEOUT = 45
-REQUEST_RETRIES = 3
-CACHE_TTL_SECONDS = 300
+SQUAWK_MEANINGS = {
+    "7500": {
+        "label": "Hijack / unlawful interference",
+        "explanation": (
+            "This code is publicly associated with hijack or unlawful interference. "
+            "The app should treat this as a high-priority public alert, but not infer anything beyond the code itself."
+        ),
+        "severity": "HIGH",
+    },
+    "7600": {
+        "label": "Radio failure",
+        "explanation": (
+            "This code is publicly associated with a loss of two-way radio communications. "
+            "Possible causes include radio equipment failure or temporary communications issues."
+        ),
+        "severity": "HIGH",
+    },
+    "7700": {
+        "label": "General emergency",
+        "explanation": (
+            "This code is publicly associated with a general emergency. "
+            "Possible causes can range from medical or mechanical issues to operational emergencies."
+        ),
+        "severity": "HIGH",
+    },
+    "7400": {
+        "label": "UAS lost link",
+        "explanation": (
+            "This code may be used by certain unmanned aircraft systems when the control link is lost."
+        ),
+        "severity": "MEDIUM",
+    },
+}
 
 
-# =========================
+# =========================================================
 # HELPERS
-# =========================
-
-def safe_text(value):
-    return "" if value is None else str(value)
-
-
-def clean_time_col(df: pd.DataFrame, col: str) -> pd.DataFrame:
-    if not df.empty and col in df.columns:
-        df[col] = pd.to_datetime(df[col], utc=True, errors="coerce")
-    return df
+# =========================================================
+def safe_str(value):
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
-def get_openai_api_key():
-    try:
-        key = st.secrets.get("OPENAI_API_KEY")
-        if key:
-            return key
-    except Exception:
-        pass
-    return os.getenv("OPENAI_API_KEY")
+def classify_callsign(callsign: str) -> str:
+    cs = safe_str(callsign).upper()
+    if any(cs.startswith(prefix) for prefix in GOV_MIL_CALLSIGN_PREFIXES):
+        return "Likely government/military-related"
+    return "Unclassified by callsign"
 
 
-def fetch_json_with_retry(url: str, timeout: int = REQUEST_TIMEOUT, retries: int = REQUEST_RETRIES):
-    last_error = None
-
-    for attempt in range(retries):
-        try:
-            response = requests.get(url, timeout=timeout)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            last_error = e
-            if attempt < retries - 1:
-                time.sleep(1.5 * (attempt + 1))
-
-    raise last_error
+def classify_country(country: str) -> str:
+    c = safe_str(country).lower()
+    if any(k in c for k in GOV_MIL_COUNTRY_KEYWORDS):
+        return "Watched state/country"
+    return "Other / unknown"
 
 
-def build_launch_rows(raw_results, include_coordinates: bool) -> pd.DataFrame:
-    rows = []
-
-    for item in raw_results:
-        pad = item.get("pad") or {}
-        location = pad.get("location") or {}
-        mission = item.get("mission") or {}
-        rocket = item.get("rocket") or {}
-        configuration = rocket.get("configuration") or {}
-        provider = item.get("launch_service_provider") or {}
-        status = item.get("status") or {}
-
-        row = {
-            "name": item.get("name"),
-            "net": item.get("net"),
-            "status": status.get("name"),
-            "provider": provider.get("name"),
-            "rocket": configuration.get("name"),
-            "mission_type": mission.get("type"),
-            "location_name": location.get("name"),
-            "country_code": location.get("country_code"),
-        }
-
-        if include_coordinates:
-            row["lat"] = pd.to_numeric(pad.get("latitude"), errors="coerce")
-            row["lon"] = pd.to_numeric(pad.get("longitude"), errors="coerce")
-
-        rows.append(row)
-
-    return pd.DataFrame(rows)
-
-
-def classify_sensitive_launch(row: pd.Series) -> dict:
+def public_flight_context(row) -> str:
     """
-    Rule-based fallback inference using only public metadata.
-    Aims to produce mission-specific explanations instead of generic ones.
+    Broad public-context note only.
+    No hidden-intent inference.
     """
-    name = safe_text(row.get("name")).lower()
-    mission_type = safe_text(row.get("mission_type")).lower()
-    provider = safe_text(row.get("provider")).lower()
-    rocket = safe_text(row.get("rocket")).lower()
-    location_name = safe_text(row.get("location_name")).lower()
-    country_code = safe_text(row.get("country_code")).lower()
-    status = safe_text(row.get("status")).lower()
+    callsign = safe_str(row.get("callsign")).upper()
+    squawk = safe_str(row.get("squawk"))
+    on_ground = row.get("on_ground")
+    velocity = row.get("velocity")
+    altitude = row.get("baro_altitude")
 
-    text = " ".join([name, mission_type, provider, rocket, location_name, country_code, status])
+    notes = []
 
-    evidence = []
-    likely_type = "Sensitive government payload"
-    why_sensitive = (
-        "This mission most likely supports government or military space operations, "
-        "and missions in that category are often described vaguely to avoid revealing capability, customer, or purpose."
-    )
-    confidence = 0.55
+    if callsign:
+        notes.append(f"Callsign observed: {callsign}.")
+    if squawk in SQUAWK_MEANINGS:
+        notes.append(SQUAWK_MEANINGS[squawk]["explanation"])
+    if on_ground is True:
+        notes.append("Aircraft appears to be on the ground.")
+    elif on_ground is False:
+        notes.append("Aircraft appears to be airborne.")
+    if pd.notna(altitude):
+        notes.append(f"Reported barometric altitude is about {int(altitude):,} m.")
+    if pd.notna(velocity):
+        notes.append(f"Reported groundspeed is about {int(velocity):,} m/s.")
 
-    if "nrol" in text:
-        likely_type = "Reconnaissance / intelligence satellite"
-        why_sensitive = (
-            "NROL missions are typically linked to the U.S. National Reconnaissance Office, "
-            "which operates intelligence-gathering satellites. Launches in this family are usually kept vague "
-            "because they can involve imaging, signals collection, or other surveillance capabilities."
-        )
-        confidence = 0.86
-        evidence.append("Mission name includes NROL")
+    if not notes:
+        return "No additional public context available."
 
-    elif "yaogan" in text:
-        likely_type = "Remote sensing / military ISR satellite"
-        why_sensitive = (
-            "Yaogan missions are widely associated with Chinese reconnaissance and remote sensing activity. "
-            "They are often treated as sensitive because they may support surveillance, maritime tracking, "
-            "or broader military intelligence functions."
-        )
-        confidence = 0.82
-        evidence.append("Mission name includes Yaogan")
-
-    elif "reconnaissance" in text:
-        likely_type = "Reconnaissance / surveillance payload"
-        why_sensitive = (
-            "The mission is publicly described as reconnaissance, which strongly suggests an intelligence, "
-            "monitoring, or ISR role. Payloads in this category are often sensitive because they reveal how a state "
-            "collects information from orbit."
-        )
-        confidence = 0.82
-        evidence.append("Mission type or name includes reconnaissance")
-
-    elif "surveillance" in text:
-        likely_type = "Surveillance / ISR payload"
-        why_sensitive = (
-            "The mission is labeled as surveillance, which usually points to monitoring, tracking, "
-            "or intelligence-gathering activity. Missions like this are often kept partially vague because "
-            "their collection targets or technical capability may be strategically important."
-        )
-        confidence = 0.79
-        evidence.append("Mission type or name includes surveillance")
-
-    elif "national security" in text:
-        likely_type = "National security space mission"
-        why_sensitive = (
-            "The mission is publicly framed as a national security launch, which usually means it supports "
-            "defense, intelligence, missile warning, secure communications, or orbital monitoring. "
-            "Those missions are often sensitive because detailed disclosure could expose strategic capability."
-        )
-        confidence = 0.78
-        evidence.append("Public metadata includes national security wording")
-
-    elif "classified" in text or "top secret" in text or "secret" in text:
-        likely_type = "Classified government mission"
-        why_sensitive = (
-            "The mission is explicitly described as classified or secret, which usually indicates a payload tied to "
-            "defense, intelligence, or another restricted government function. Public details are often limited to avoid "
-            "revealing the system’s exact role or capability."
-        )
-        confidence = 0.77
-        evidence.append("Public metadata includes classified/secret wording")
-
-    elif "military" in text:
-        likely_type = "Military support payload"
-        why_sensitive = (
-            "The mission appears linked to military activity, which often means it supports communications, surveillance, "
-            "navigation, early warning, or other operational functions. Payloads in these roles are commonly described vaguely "
-            "to avoid exposing their usefulness in conflict or strategic planning."
-        )
-        confidence = 0.73
-        evidence.append("Public metadata includes military wording")
-
-    elif "government" in text:
-        likely_type = "Government operational payload"
-        why_sensitive = (
-            "The mission appears to be a government payload rather than a commercial one. Government missions are often more "
-            "sensitive because they can support state communications, observation, science with dual-use value, or other public-sector operations."
-        )
-        confidence = 0.68
-        evidence.append("Public metadata includes government wording")
-
-    if "spacex" in text and "nrol" in text:
-        evidence.append("Pattern resembles recent Falcon 9 NRO mission profiles")
-        confidence = max(confidence, 0.86)
-
-    if "united launch alliance" in text or "ula" in text:
-        evidence.append("ULA frequently launches U.S. national security payloads")
-        if likely_type == "Sensitive government payload":
-            likely_type = "Possible U.S. national security payload"
-            why_sensitive = (
-                "This mission uses a launch provider strongly associated with U.S. government and defense launches. "
-                "That makes it more likely to involve a payload with military, intelligence, or strategic support value."
-            )
-        confidence = max(confidence, 0.73)
-
-    if "northrop grumman" in text:
-        evidence.append("Northrop Grumman commonly supports defense missions")
-        if likely_type == "Sensitive government payload":
-            likely_type = "Possible defense-linked payload"
-            why_sensitive = (
-                "This mission is associated with a contractor that regularly supports defense and national security programs, "
-                "which increases the chance that the payload has military or intelligence relevance."
-            )
-        confidence = max(confidence, 0.72)
-
-    if "rocket lab" in text and ("government" in text or "military" in text):
-        evidence.append("Rocket Lab increasingly launches security-linked payloads")
-        confidence = max(confidence, 0.66)
-
-    if "roscosmos" in text and ("military" in text or "government" in text):
-        evidence.append("Roscosmos missions can include state-directed or dual-use payloads")
-        confidence = max(confidence, 0.66)
-
-    if "vandenberg" in text:
-        evidence.append("Vandenberg launches often support polar-orbit security missions")
-
-    if "cape canaveral" in text or "kennedy" in text:
-        evidence.append("Florida launch sites are often used for strategic U.S. government missions")
-
-    if not evidence:
-        evidence.append("Inference based on public mission labels and launch pattern")
-
-    return {
-        "likely_type": likely_type,
-        "why_sensitive": why_sensitive,
-        "confidence": round(confidence, 2),
-        "evidence": evidence[:4],
-    }
+    return " ".join(notes)
 
 
-def infer_sensitive_launch_ai(row: pd.Series, model: str = "gpt-5.2") -> dict:
-    """
-    AI explanation layer. Falls back to rule-based logic if unavailable.
-    """
-    api_key = get_openai_api_key()
-    if not OPENAI_AVAILABLE or not api_key:
-        return classify_sensitive_launch(row)
-
-    client = OpenAI(api_key=api_key)
-
-    fields = {
-        "name": safe_text(row.get("name")),
-        "net": safe_text(row.get("net")),
-        "status": safe_text(row.get("status")),
-        "provider": safe_text(row.get("provider")),
-        "rocket": safe_text(row.get("rocket")),
-        "mission_type": safe_text(row.get("mission_type")),
-        "location_name": safe_text(row.get("location_name")),
-        "country_code": safe_text(row.get("country_code")),
-    }
-
-    prompt = f"""
-You are an aerospace OSINT analyst.
-
-A launch has been flagged as publicly sensitive based on public metadata.
-Using ONLY the metadata below, infer the most likely mission category and explain specifically why a mission of this type would be considered sensitive.
-
-Rules:
-- Do not claim certainty.
-- Use cautious language.
-- Do not give a generic answer like "it is classified" or "it is national security-related."
-- Explain the likely operational reason it is sensitive, such as reconnaissance, ISR, military communications, missile warning, government monitoring, or strategic support.
-- Base your answer only on the metadata below.
-- Return valid JSON only.
-
-Required JSON schema:
-{{
-  "likely_type": "string",
-  "why_sensitive": "string",
-  "confidence": 0.0,
-  "evidence": ["string", "string", "string"]
-}}
-
-Launch metadata:
-{json.dumps(fields, ensure_ascii=False)}
-"""
-
-    try:
-        response = client.responses.create(
-            model=model,
-            input=prompt,
-        )
-        parsed = json.loads(response.output_text.strip())
-        return {
-            "likely_type": parsed.get("likely_type", "Unknown sensitive payload"),
-            "why_sensitive": parsed.get("why_sensitive", "Public metadata suggests a security-linked mission."),
-            "confidence": float(parsed.get("confidence", 0.5)),
-            "evidence": parsed.get("evidence", [])[:4],
-        }
-    except Exception:
-        return classify_sensitive_launch(row)
-
-
-# =========================
+# =========================================================
 # DATA LOADING
-# =========================
+# =========================================================
+@st.cache_data(ttl=60)
+def get_live_states():
+    response = requests.get(OPENSKY_STATES_URL, timeout=20)
+    response.raise_for_status()
+    payload = response.json()
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS)
-def get_upcoming_launches():
-    url = f"https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit={UPCOMING_LIMIT}&mode=detailed"
-    raw = fetch_json_with_retry(url)["results"]
+    states = payload.get("states") or []
 
-    df = build_launch_rows(raw, include_coordinates=True)
-    df = clean_time_col(df, "net")
-
-    if not df.empty:
-        df = df.sort_values("net")
-
-    return df
-
-
-@st.cache_data(ttl=CACHE_TTL_SECONDS)
-def get_recent_launches():
-    url = f"https://ll.thespacedevs.com/2.2.0/launch/previous/?limit={RECENT_LIMIT}&mode=detailed"
-    raw = fetch_json_with_retry(url)["results"]
-
-    df = build_launch_rows(raw, include_coordinates=False)
-    df = clean_time_col(df, "net")
-
-    if not df.empty:
-        df = df.sort_values("net", ascending=False)
-
-    return df
-
-
-# =========================
-# LOAD DATA
-# =========================
-
-launch_error = None
-recent_launch_error = None
-
-try:
-    launches_df = get_upcoming_launches()
-except Exception as e:
-    launches_df = pd.DataFrame()
-    launch_error = str(e)
-
-try:
-    recent_launches_df = get_recent_launches()
-except Exception as e:
-    recent_launches_df = pd.DataFrame()
-    recent_launch_error = str(e)
-
-
-# =========================
-# DERIVED TABLES
-# =========================
-
-failed_launches_df = pd.DataFrame()
-sensitive_launches_df = pd.DataFrame()
-
-if not recent_launches_df.empty:
-    now_utc = pd.Timestamp.utcnow()
-
-    failed_keywords = ["failure", "partial failure", "failed"]
-    failed_mask = (
-        recent_launches_df["status"]
-        .fillna("")
-        .str.lower()
-        .apply(lambda x: any(word in x for word in failed_keywords))
-    )
-
-    failed_launches_df = recent_launches_df[failed_mask].copy()
-    failed_launches_df = failed_launches_df[
-        failed_launches_df["net"] >= now_utc - pd.Timedelta(days=30)
-    ].copy()
-
-    mission_series = recent_launches_df["mission_type"].fillna("").str.lower()
-    provider_series = recent_launches_df["provider"].fillna("").str.lower()
-    name_series = recent_launches_df["name"].fillna("").str.lower()
-
-    sensitive_mask = (
-        mission_series.apply(lambda x: any(k in x for k in SENSITIVE_KEYWORDS))
-        | name_series.apply(lambda x: any(k in x for k in SENSITIVE_KEYWORDS))
-        | (
-            provider_series.apply(lambda x: any(k in x for k in WATCHED_PROVIDERS))
-            & (
-                mission_series.str.contains(
-                    "government|military|surveillance|reconnaissance|classified|national security",
-                    na=False,
-                )
-                | name_series.str.contains(
-                    "nrol|usa-|classified|secret|military|yaogan",
-                    na=False,
-                )
-            )
+    rows = []
+    for s in states:
+        # OpenSky state vector order used here:
+        # 0 icao24
+        # 1 callsign
+        # 2 origin_country
+        # 3 time_position
+        # 4 last_contact
+        # 5 longitude
+        # 6 latitude
+        # 7 baro_altitude
+        # 8 on_ground
+        # 9 velocity
+        # 10 true_track
+        # 11 vertical_rate
+        # 12 sensors
+        # 13 geo_altitude
+        # 14 squawk
+        # 15 spi
+        # 16 position_source
+        # 17 category
+        rows.append(
+            {
+                "icao24": s[0],
+                "callsign": safe_str(s[1]),
+                "origin_country": safe_str(s[2]),
+                "time_position": s[3],
+                "last_contact": s[4],
+                "longitude": s[5],
+                "latitude": s[6],
+                "baro_altitude": s[7],
+                "on_ground": s[8],
+                "velocity": s[9],
+                "true_track": s[10],
+                "vertical_rate": s[11],
+                "geo_altitude": s[13],
+                "squawk": safe_str(s[14]),
+                "spi": s[15],
+                "position_source": s[16],
+                "category": s[17] if len(s) > 17 else None,
+            }
         )
-    )
 
-    sensitive_launches_df = recent_launches_df[sensitive_mask].copy()
-    sensitive_launches_df = sensitive_launches_df[
-        sensitive_launches_df["net"] >= now_utc - pd.Timedelta(days=90)
-    ].copy()
+    df = pd.DataFrame(rows)
+
+    if not df.empty:
+        df["gov_mil_callsign_flag"] = df["callsign"].apply(classify_callsign)
+        df["country_watch_flag"] = df["origin_country"].apply(classify_country)
+        df["is_emergency_squawk"] = df["squawk"].isin(SQUAWK_MEANINGS.keys())
+        df["squawk_label"] = df["squawk"].apply(
+            lambda x: SQUAWK_MEANINGS[x]["label"] if x in SQUAWK_MEANINGS else ""
+        )
+        df["squawk_severity"] = df["squawk"].apply(
+            lambda x: SQUAWK_MEANINGS[x]["severity"] if x in SQUAWK_MEANINGS else "LOW"
+        )
+        df["public_context"] = df.apply(public_flight_context, axis=1)
+
+    return df
 
 
-# =========================
+# =========================================================
+# LOAD
+# =========================================================
+data_error = None
+
+try:
+    flights_df = get_live_states()
+except Exception as e:
+    flights_df = pd.DataFrame()
+    data_error = str(e)
+
+# =========================================================
+# FILTERS
+# =========================================================
+st.subheader("Filters")
+
+f1, f2, f3 = st.columns(3)
+
+with f1:
+    show_emergency_only = st.checkbox("Emergency squawks only", value=True)
+
+with f2:
+    show_gov_mil_only = st.checkbox("Government / military-related only", value=False)
+
+with f3:
+    show_airborne_only = st.checkbox("Airborne only", value=True)
+
+filtered_df = flights_df.copy()
+
+if not filtered_df.empty:
+    if show_emergency_only:
+        filtered_df = filtered_df[filtered_df["is_emergency_squawk"] == True]
+
+    if show_gov_mil_only:
+        filtered_df = filtered_df[
+            (filtered_df["gov_mil_callsign_flag"] == "Likely government/military-related")
+            | (filtered_df["country_watch_flag"] == "Watched state/country")
+        ]
+
+    if show_airborne_only:
+        filtered_df = filtered_df[filtered_df["on_ground"] == False]
+
+# =========================================================
 # STATUS CARDS
-# =========================
-
+# =========================================================
 st.subheader("System Status")
 
 c1, c2, c3, c4 = st.columns(4)
 
 with c1:
-    st.metric("Upcoming Launches", len(launches_df))
+    st.metric("Flights loaded", len(flights_df))
 
 with c2:
-    st.metric("Recent Failed Launches", len(failed_launches_df))
+    emergency_count = int(flights_df["is_emergency_squawk"].sum()) if not flights_df.empty else 0
+    st.metric("Emergency squawks", emergency_count)
 
 with c3:
-    st.metric("Sensitive Launches", len(sensitive_launches_df))
+    govmil_count = int(
+        (
+            (flights_df["gov_mil_callsign_flag"] == "Likely government/military-related")
+            | (flights_df["country_watch_flag"] == "Watched state/country")
+        ).sum()
+    ) if not flights_df.empty else 0
+    st.metric("Gov / military-related", govmil_count)
 
 with c4:
-    if launch_error and recent_launch_error:
-        st.error("Feeds Degraded")
-    elif launch_error or recent_launch_error:
-        st.warning("Partial Feed Issues")
+    if data_error:
+        st.error("Flight Feed Offline")
     else:
-        st.success("Launch Feeds Online")
+        st.success("Flight Feed Online")
 
 st.divider()
 
-
-# =========================
-# MAP + OVERVIEW
-# =========================
-
+# =========================================================
+# MAP + EXPLANATION PANEL
+# =========================================================
 left, right = st.columns([1.5, 1])
 
 with left:
-    st.subheader("Launch Site Map")
+    st.subheader("Live Flight Map")
 
-    if launch_error:
-        st.warning("Upcoming launch map is temporarily unavailable from the upstream API.")
-        st.caption("The provider did not respond in time. Try refreshing in a minute.")
-    elif launches_df.empty:
-        st.info("No launch data available right now.")
+    if data_error:
+        st.error(f"Flight data unavailable: {data_error}")
+    elif filtered_df.empty:
+        st.info("No flights match the current filters.")
     else:
-        map_df = launches_df.dropna(subset=["lat", "lon"]).copy()
+        map_df = filtered_df.dropna(subset=["latitude", "longitude"]).copy()
 
         if map_df.empty:
-            st.info("No launch coordinates available right now.")
+            st.info("No flight coordinates available for the current filters.")
         else:
-            fig_map = px.scatter_geo(
+            fig = px.scatter_geo(
                 map_df,
-                lat="lat",
-                lon="lon",
-                hover_name="name",
-                hover_data=["provider", "rocket", "mission_type", "location_name", "net"],
-                title="Upcoming Launch Locations",
+                lat="latitude",
+                lon="longitude",
+                hover_name="callsign",
+                hover_data=["origin_country", "squawk", "squawk_label", "velocity", "baro_altitude"],
+                title="Filtered Live Flights",
             )
-            fig_map.update_traces(marker=dict(size=10))
-            fig_map.update_layout(height=520, margin=dict(l=0, r=0, t=50, b=0))
-            st.plotly_chart(fig_map, use_container_width=True)
+            fig.update_traces(marker=dict(size=8))
+            fig.update_layout(height=520, margin=dict(l=0, r=0, t=50, b=0))
+            st.plotly_chart(fig, use_container_width=True)
 
 with right:
-    st.subheader("Launch Overview")
+    st.subheader("How the AI-style explanation works")
+    st.caption("These are broad public explanations, not factual determinations of cause or intent.")
 
-    if launch_error:
-        st.warning("Live upcoming launch monitoring is temporarily unavailable.")
-    else:
-        st.success("Live launch monitoring is active.")
-
-        if not launches_df.empty:
-            next_launch_name = safe_text(launches_df.iloc[0]["name"])
-            next_launch_time = safe_text(launches_df.iloc[0]["net"])
-
-            st.markdown("**Next scheduled launch**")
-            st.write(next_launch_name)
-            st.write(next_launch_time)
-
-    st.markdown("**Current focus**")
-    st.write("- Upcoming launch activity")
-    st.write("- Recent failed launches")
-    st.write("- Publicly labeled sensitive missions")
-    st.write("- AI-assisted mission inference")
-
-st.divider()
-
-
-# =========================
-# UPCOMING LAUNCHES
-# =========================
-
-st.subheader("Upcoming Launches")
-
-if launch_error:
-    st.warning("Upcoming launch feed is temporarily unavailable from the upstream API.")
-    st.caption("The provider did not respond in time. Try refreshing in a minute.")
-elif launches_df.empty:
-    st.info("No upcoming launches available.")
-else:
-    nice_launches = launches_df[
-        ["name", "net", "status", "provider", "rocket", "mission_type", "location_name"]
-    ].copy()
-
-    nice_launches = nice_launches.rename(
-        columns={
-            "name": "Launch",
-            "net": "Time (UTC)",
-            "status": "Status",
-            "provider": "Provider",
-            "rocket": "Rocket",
-            "mission_type": "Mission Type",
-            "location_name": "Location",
-        }
-    )
-
-    st.dataframe(nice_launches, use_container_width=True, hide_index=True)
-
-st.divider()
-
-
-# =========================
-# RECENT FAILED LAUNCHES
-# =========================
-
-st.subheader("Recent Failed Launches")
-
-if recent_launch_error:
-    st.warning("Recent launch history is temporarily unavailable from the upstream API.")
-    st.caption("The provider did not respond in time. Try refreshing in a minute.")
-elif failed_launches_df.empty:
-    st.success("No failed launches found in the last 30 days.")
-else:
-    failed_display = failed_launches_df[
-        ["name", "net", "status", "provider", "rocket", "mission_type", "location_name"]
-    ].copy()
-
-    failed_display = failed_display.rename(
-        columns={
-            "name": "Launch",
-            "net": "Time (UTC)",
-            "status": "Status",
-            "provider": "Provider",
-            "rocket": "Rocket",
-            "mission_type": "Mission Type",
-            "location_name": "Location",
-        }
-    )
-
-    st.dataframe(failed_display, use_container_width=True, hide_index=True)
-
-st.divider()
-
-
-# =========================
-# SENSITIVE LAUNCHES
-# =========================
-
-st.subheader("Publicly Labeled Sensitive Launches")
-st.caption(
-    "This section uses public labels and metadata only. It does not identify undisclosed or covert launches."
-)
-
-if recent_launch_error:
-    st.warning("Recent launch history is temporarily unavailable from the upstream API.")
-    st.caption("Sensitive launch detection depends on that feed.")
-elif sensitive_launches_df.empty:
-    st.info("No publicly labeled sensitive launches found in the last 90 days.")
-else:
-    sensitive_display = sensitive_launches_df[
-        ["name", "net", "status", "provider", "rocket", "mission_type", "location_name"]
-    ].copy()
-
-    sensitive_display = sensitive_display.rename(
-        columns={
-            "name": "Launch",
-            "net": "Time (UTC)",
-            "status": "Status",
-            "provider": "Provider",
-            "rocket": "Rocket",
-            "mission_type": "Mission Type",
-            "location_name": "Location",
-        }
-    )
-
-    st.dataframe(sensitive_display, use_container_width=True, hide_index=True)
-
-st.divider()
-
-
-# =========================
-# AI INFERENCE ON SENSITIVE LAUNCHES
-# =========================
-
-st.subheader("AI Inference on Sensitive Launches")
-st.caption(
-    "Best-effort OSINT estimate of why a publicly labeled sensitive mission may be sensitive. This is not confirmation of the real payload."
-)
-
-if recent_launch_error:
-    st.warning("AI inference is unavailable because recent launch history could not be loaded.")
-elif sensitive_launches_df.empty:
-    st.info("No sensitive launches available for AI inference.")
-else:
-    use_ai = st.toggle("Use AI-generated explanations", value=True)
-    max_rows = st.slider(
-        "Number of sensitive launches to analyse",
-        min_value=1,
-        max_value=min(10, len(sensitive_launches_df)),
-        value=min(5, len(sensitive_launches_df)),
-    )
-
-    analysis_df = sensitive_launches_df.head(max_rows).copy()
-    results = []
-
-    with st.spinner("Analysing sensitive missions..."):
-        for _, row in analysis_df.iterrows():
-            result = infer_sensitive_launch_ai(row) if use_ai else classify_sensitive_launch(row)
-
-            results.append(
-                {
-                    "Launch": safe_text(row.get("name")),
-                    "Time (UTC)": safe_text(row.get("net")),
-                    "Provider": safe_text(row.get("provider")),
-                    "Rocket": safe_text(row.get("rocket")),
-                    "Mission Type": safe_text(row.get("mission_type")),
-                    "Likely Purpose": result["likely_type"],
-                    "Why It May Be Sensitive": result["why_sensitive"],
-                    "Confidence": f"{int(float(result['confidence']) * 100)}%",
-                    "Evidence": " | ".join(result["evidence"]),
-                }
-            )
-
-    results_df = pd.DataFrame(results)
-    st.dataframe(results_df, use_container_width=True, hide_index=True)
-
-    with st.expander("Show detailed analyst cards"):
-        for _, row in results_df.iterrows():
-            st.markdown(f"### {row['Launch']}")
-            st.write(f"**Time (UTC):** {row['Time (UTC)']}")
-            st.write(f"**Provider:** {row['Provider']}")
-            st.write(f"**Rocket:** {row['Rocket']}")
-            st.write(f"**Mission Type:** {row['Mission Type']}")
-            st.write(f"**Likely Purpose:** {row['Likely Purpose']}")
-            st.write(f"**Why It May Be Sensitive:** {row['Why It May Be Sensitive']}")
-            st.write(f"**Confidence:** {row['Confidence']}")
-            st.write(f"**Evidence:** {row['Evidence']}")
-            st.markdown("---")
-
-st.divider()
-
-
-# =========================
-# ANALYST SUMMARY
-# =========================
-
-st.subheader("Analyst Summary")
-
-if launch_error and recent_launch_error:
     st.markdown(
         """
-- Upstream launch feeds are currently responding slowly or timing out.
-- The dashboard layout is working.
-- Retry logic is enabled, but the external provider may still be temporarily unavailable.
+- **7500** → hijack / unlawful interference  
+- **7600** → radio failure  
+- **7700** → general emergency  
+- **7400** → UAS lost-link context in some cases  
+
+The dashboard only gives **plausible public explanations** based on the squawk code and visible flight context. It does **not** claim to know the real reason.
+"""
+    )
+
+    if not filtered_df.empty:
+        first_row = filtered_df.iloc[0]
+        st.markdown("**Example explanation**")
+        st.write(first_row.get("public_context", "No explanation available."))
+
+st.divider()
+
+# =========================================================
+# SQUAWK TABLE
+# =========================================================
+st.subheader("Emergency Squawk Watchlist")
+
+if data_error:
+    st.error(f"Flight feed unavailable: {data_error}")
+elif filtered_df.empty:
+    st.info("No flights match the current filters.")
+else:
+    display_df = filtered_df[
+        [
+            "callsign",
+            "origin_country",
+            "squawk",
+            "squawk_label",
+            "gov_mil_callsign_flag",
+            "country_watch_flag",
+            "on_ground",
+            "velocity",
+            "baro_altitude",
+            "public_context",
+        ]
+    ].copy()
+
+    display_df = display_df.rename(
+        columns={
+            "callsign": "Callsign",
+            "origin_country": "Origin Country",
+            "squawk": "Squawk",
+            "squawk_label": "Meaning",
+            "gov_mil_callsign_flag": "Callsign Heuristic",
+            "country_watch_flag": "Country Heuristic",
+            "on_ground": "On Ground",
+            "velocity": "Velocity (m/s)",
+            "baro_altitude": "Baro Altitude (m)",
+            "public_context": "Public Explanation",
+        }
+    )
+
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+st.divider()
+
+# =========================================================
+# ANALYST SUMMARY
+# =========================================================
+st.subheader("Analyst Summary")
+
+if data_error:
+    st.markdown(
+        f"""
+- The live flight feed is currently unavailable.
+- Error returned by the upstream source: `{data_error}`
+- The page is online, but the flight data source needs to recover.
 """
     )
 else:
-    next_launch_name = safe_text(launches_df.iloc[0]["name"]) if not launches_df.empty else "No launch available"
-    next_launch_time = safe_text(launches_df.iloc[0]["net"]) if not launches_df.empty else "N/A"
-
     st.markdown(
         f"""
-- **{len(launches_df)}** upcoming launch records are currently loaded.
-- **{len(failed_launches_df)}** failed launches were found in the last 30 days.
-- **{len(sensitive_launches_df)}** publicly labeled sensitive launches were found in the last 90 days.
-- The **next scheduled launch** is **{next_launch_name}**.
-- The next launch time is **{next_launch_time}**.
-- Retry-based API loading is enabled for better resilience.
-- Sensitive-mission inference is enabled with rule-based logic and optional AI explanation support.
+- **{len(flights_df)}** live flight state records were loaded.
+- **{int(flights_df["is_emergency_squawk"].sum())}** flights are showing emergency squawk codes.
+- **{int(((flights_df["gov_mil_callsign_flag"] == "Likely government/military-related") | (flights_df["country_watch_flag"] == "Watched state/country")).sum())}** flights matched the public government / military heuristics.
+- The explanations shown for squawks are **broad public interpretations** based on FAA emergency code meanings and visible flight context, not confirmed causes.
 """
     )
