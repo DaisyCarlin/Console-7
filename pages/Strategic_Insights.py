@@ -66,6 +66,9 @@ MILITARY_CALLSIGN_RULES = [
     ("LAGR", "Military operations callsign family"),
 ]
 
+SPECIAL_SQUAWKS = {"7500", "7600", "7700", "7400"}
+NATO_RELATED_PREFIXES = {"NATO", "CFC"}
+
 # ----------------------------
 # STYLES
 # ----------------------------
@@ -279,6 +282,8 @@ def build_launch_events(raw_results) -> pd.DataFrame:
                 "sensitive": looks_sensitive_launch(name, subcategory, source),
                 "name": name,
                 "detail": safe_text(configuration.get("name")) or "Unknown rocket",
+                "country_confidence": "structured",
+                "classification_confidence": "higher",
             }
         )
 
@@ -312,6 +317,7 @@ def build_flight_events(payload) -> pd.DataFrame:
         callsign = safe_text(state[1] if len(state) > 1 else None)
         origin_country = safe_text(state[2] if len(state) > 2 else None)
         last_contact = state[4] if len(state) > 4 else None
+        squawk = safe_text(state[14] if len(state) > 14 else None)
 
         is_military, military_reason = detect_military_callsign(callsign)
         if not is_military:
@@ -320,6 +326,10 @@ def build_flight_events(payload) -> pd.DataFrame:
         timestamp = pd.to_datetime(last_contact, unit="s", utc=True, errors="coerce")
         if pd.isna(timestamp):
             continue
+
+        normalized_callsign = callsign.upper().replace(" ", "")
+        nato_related = any(normalized_callsign.startswith(prefix) for prefix in NATO_RELATED_PREFIXES)
+        has_special_squawk = squawk in SPECIAL_SQUAWKS
 
         rows.append(
             {
@@ -332,6 +342,12 @@ def build_flight_events(payload) -> pd.DataFrame:
                 "sensitive": True,
                 "name": callsign or "N/A",
                 "detail": military_reason,
+                "callsign": callsign or "N/A",
+                "squawk": squawk,
+                "nato_related": nato_related,
+                "has_special_squawk": has_special_squawk,
+                "country_confidence": "feed_reported" if origin_country else "unknown",
+                "classification_confidence": "heuristic",
             }
         )
 
@@ -380,7 +396,7 @@ def get_blended_events() -> tuple[pd.DataFrame, list[str]]:
         military_df = get_military_flight_events()
         if not military_df.empty:
             frames.append(military_df)
-        sources_loaded.append("Military flights")
+        sources_loaded.append("Military-linked flights")
     except Exception as error:
         flight_error = str(error)
 
@@ -394,7 +410,18 @@ def get_blended_events() -> tuple[pd.DataFrame, list[str]]:
 
     events_df = pd.concat(frames, ignore_index=True)
 
-    for required_col in ["event_id", "timestamp", "country", "event_type", "subcategory", "source", "sensitive"]:
+    required_columns = [
+        "event_id",
+        "timestamp",
+        "country",
+        "event_type",
+        "subcategory",
+        "source",
+        "sensitive",
+        "country_confidence",
+        "classification_confidence",
+    ]
+    for required_col in required_columns:
         if required_col not in events_df.columns:
             if required_col == "sensitive":
                 events_df[required_col] = False
@@ -407,6 +434,8 @@ def get_blended_events() -> tuple[pd.DataFrame, list[str]]:
     events_df["subcategory"] = events_df["subcategory"].fillna("").astype(str).str.strip().replace("", "Unknown")
     events_df["source"] = events_df["source"].fillna("").astype(str).str.strip().replace("", "Unknown")
     events_df["sensitive"] = events_df["sensitive"].fillna(False).astype(bool)
+    events_df["country_confidence"] = events_df["country_confidence"].fillna("").astype(str)
+    events_df["classification_confidence"] = events_df["classification_confidence"].fillna("").astype(str)
 
     return events_df, sources_loaded
 
@@ -512,7 +541,7 @@ def describe_scope(selected_event_types: list[str], all_event_types: list[str]) 
     if len(selected) == 1:
         mapping = {
             "launch": "launch activity",
-            "military_flight": "military flight activity",
+            "military_flight": "military-linked flight activity",
             "satellite": "satellite activity",
             "emergency_flight": "emergency flight activity",
         }
@@ -542,6 +571,54 @@ def describe_driver_mix(country: str, current_df: pd.DataFrame) -> str:
     if len(top_types) == 1:
         return f"{top_types[0]} activity"
     return f"{top_types[0]} and {top_types[1]} activity"
+
+
+def build_qualifier_bullets(current_df: pd.DataFrame, selected_event_types: list[str], all_event_types: list[str]) -> list[str]:
+    bullets: list[str] = []
+    selected = sorted([x for x in selected_event_types if x])
+    full_view = (not selected) or (selected == sorted(all_event_types))
+    flight_in_scope = full_view or ("military_flight" in selected)
+    launch_in_scope = full_view or ("launch" in selected)
+
+    if flight_in_scope:
+        bullets.append(
+            "Flight-side classifications in this view are based on military callsign patterns and should be treated as military-linked indicators rather than fully confirmed operator identity."
+        )
+
+        unknown_country_count = 0
+        if "country" in current_df.columns:
+            unknown_country_count = int((current_df["country"].fillna("").astype(str).str.strip() == "Unknown").sum())
+
+        if unknown_country_count > 0:
+            bullets.append(
+                f"{unknown_country_count} flight-side records in the current sample have unknown or incomplete country attribution in the live feed, so national attribution should be treated as provisional in those cases."
+            )
+
+        if "nato_related" in current_df.columns:
+            nato_count = int(current_df[current_df["event_type"] == "military_flight"]["nato_related"].fillna(False).sum())
+            if nato_count > 0:
+                bullets.append(
+                    f"{nato_count} military-linked flights in the current view appear NATO-associated based on callsign patterns, but that should be read as alliance-linked inference rather than confirmed operator disclosure."
+                )
+
+        if "has_special_squawk" in current_df.columns:
+            squawk_count = int(current_df[current_df["event_type"] == "military_flight"]["has_special_squawk"].fillna(False).sum())
+            if squawk_count > 0:
+                bullets.append(
+                    f"{squawk_count} military-linked flights in the current sample also displayed notable squawk activity, which increases operational interest but does not independently confirm mission purpose."
+                )
+
+    if launch_in_scope:
+        bullets.append(
+            "Launch-side classifications are more structured than the flight side because they come from mission, provider, and launch metadata rather than callsign heuristics."
+        )
+
+    if full_view and launch_in_scope and flight_in_scope:
+        bullets.append(
+            "This blended view combines higher-confidence launch attribution with lower-confidence military-linked flight indicators, so confidence is not uniform across all event types."
+        )
+
+    return bullets[:4]
 
 
 def build_narrative_insights(
@@ -578,51 +655,26 @@ def build_narrative_insights(
             f"({float(biggest_increase['pct_change']):+.1f}%), led by {biggest_increase_driver}."
         )
 
-    biggest_decrease_df = summary_df[summary_df["absolute_change"] < 0].sort_values(
-        ["absolute_change", "pct_change", "country"],
-        ascending=[True, True, True],
-    )
-    if not biggest_decrease_df.empty:
-        biggest_decrease = biggest_decrease_df.iloc[0]
-        insights.append(
-            f"{biggest_decrease['country']} records the sharpest decline in {scope_text}, down "
-            f"{abs(int(biggest_decrease['absolute_change']))} events "
-            f"({float(biggest_decrease['pct_change']):+.1f}%) compared with last month."
-        )
-
     high_sensitive_df = current_positive[current_positive["sensitive_share"] >= 50].sort_values(
         ["sensitive_share", "sensitive_count", "country"],
         ascending=[False, False, True],
     )
-    if not high_sensitive_df.empty:
+    single_type_flight_view = selected_event_types == ["military_flight"] if selected_event_types else False
+    if not high_sensitive_df.empty and not single_type_flight_view:
         sensitive_leader = high_sensitive_df.iloc[0]
         insights.append(
             f"{sensitive_leader['country']} has the highest sensitive-event concentration in the current {scope_text} view, with "
             f"{sensitive_leader['sensitive_share']:.0f}% of its logged activity marked sensitive."
         )
 
-    top_source_df = current_positive.sort_values(["current_count", "country"], ascending=[False, True])
-    if not top_source_df.empty:
-        source_leader = top_source_df.iloc[0]
+    high_significance_df = summary_df[summary_df["significance"] == "High"]
+    if not high_significance_df.empty:
+        highlighted = ", ".join(high_significance_df["country"].head(3).tolist())
         insights.append(
-            f"The dominant source feeding current activity for {source_leader['country']} is "
-            f"{source_leader['top_source']}."
+            f"{len(high_significance_df)} countries currently rate as high significance in this view, with {highlighted} standing out most clearly."
         )
 
-    high_significance_count = int((summary_df["significance"] == "High").sum())
-    if high_significance_count > 0:
-        highlighted = ", ".join(summary_df[summary_df["significance"] == "High"]["country"].head(3).tolist())
-        insights.append(
-            f"{high_significance_count} countries currently rate as high significance in this view, with {highlighted} standing out most clearly."
-        )
-    else:
-        medium_significance_count = int((summary_df["significance"] == "Medium").sum())
-        insights.append(
-            f"No countries currently meet the high-significance threshold. "
-            f"{medium_significance_count} countries sit in the medium-significance band."
-        )
-
-    return insights[:6]
+    return insights[:4]
 
 
 def format_summary_table(summary_df: pd.DataFrame) -> pd.DataFrame:
@@ -676,7 +728,7 @@ st.markdown(
         <div class="hero-kicker">COUNTRY-LEVEL ANALYST VIEW</div>
         <h1 class="hero-title">Strategic Insights</h1>
         <p class="hero-copy">
-            Blend live launch activity and live military-flight activity into one analyst view by default,
+            Blend live launch activity and military-linked flight activity into one analyst view by default,
             then narrow the picture with filters whenever you want.
         </p>
     </div>
@@ -724,6 +776,7 @@ previous_month_start, current_month_start, next_month_start = month_windows(now_
 
 summary_df, current_month_df, previous_month_df = calculate_country_summary(filtered_events_df, now_utc)
 insights = build_narrative_insights(summary_df, current_month_df, selected_event_types, all_event_types)
+qualifier_bullets = build_qualifier_bullets(current_month_df, selected_event_types, all_event_types)
 scope_text = describe_scope(selected_event_types, all_event_types)
 
 st.caption(
@@ -778,6 +831,21 @@ st.markdown(
 for insight in insights:
     st.markdown(f"- {insight}")
 
+if qualifier_bullets:
+    st.markdown(
+        """
+        <div class="panel-card">
+            <div class="panel-title">Interpretation Notes</div>
+            <div class="panel-copy">
+                These qualifiers explain where the current view is stronger, weaker, or more inference-based.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    for bullet in qualifier_bullets:
+        st.markdown(f"- {bullet}")
+
 left_col, right_col = st.columns([1.65, 1], gap="large")
 
 with left_col:
@@ -830,8 +898,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+single_type_flight_view = selected_event_types == ["military_flight"] if selected_event_types else False
 if summary_df.empty or int(summary_df["current_count"].sum()) == 0:
     st.info("No current-month sensitivity split is available.")
+elif single_type_flight_view:
+    st.info("Sensitivity share is less informative in the current flight-only view because military-linked flight records are marked sensitive by design.")
 else:
     sensitivity_chart_df = summary_df[summary_df["current_count"] > 0][["country", "sensitive_count", "current_count"]].copy()
     sensitivity_chart_df["non_sensitive_count"] = sensitivity_chart_df["current_count"] - sensitivity_chart_df["sensitive_count"]
@@ -852,6 +923,8 @@ st.markdown(
 
 if current_month_df.empty:
     st.info("No current-month source mix is available.")
+elif single_type_flight_view and current_month_df["source"].nunique() <= 1:
+    st.info("Source mix is not very informative in the current flight-only view because the activity is coming from a single live feed.")
 else:
     source_chart_df = (
         current_month_df.groupby("source")
@@ -868,7 +941,7 @@ st.markdown(
     <div class="panel-card">
         <div class="panel-title">Event-Type Mix This Month</div>
         <div class="panel-copy">
-            See how the current-month activity picture breaks down across launches and military flights.
+            See how the current-month activity picture breaks down across launches and military-linked flights.
         </div>
     </div>
     """,
