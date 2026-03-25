@@ -43,6 +43,44 @@ SATELLITE_GROUPS = {
     "Military": [("military", "Public military catalogue")],
 }
 
+REGION_SCOPES = {
+    "Global": {
+        "summary": "Full world orbital picture with no regional clipping.",
+        "center": {"lat": 16.0, "lon": 0.0, "zoom": 2},
+        "bounds": None,
+    },
+    "Europe": {
+        "summary": "North Sea, Mediterranean, Baltic, and continental European passes.",
+        "center": {"lat": 52.0, "lon": 12.0, "zoom": 4},
+        "bounds": {"lat_min": 34.0, "lat_max": 72.0, "lon_min": -25.0, "lon_max": 45.0},
+    },
+    "Asia": {
+        "summary": "Middle East to Western Pacific orbital subpoint coverage.",
+        "center": {"lat": 30.0, "lon": 95.0, "zoom": 3},
+        "bounds": {"lat_min": 0.0, "lat_max": 78.0, "lon_min": 25.0, "lon_max": 180.0},
+    },
+    "North America": {
+        "summary": "North Atlantic, Pacific approaches, and continental North America.",
+        "center": {"lat": 38.0, "lon": -98.0, "zoom": 3},
+        "bounds": {"lat_min": 7.0, "lat_max": 72.0, "lon_min": -170.0, "lon_max": -50.0},
+    },
+    "South America": {
+        "summary": "Atlantic, Pacific, and southern cone regional view.",
+        "center": {"lat": -15.0, "lon": -60.0, "zoom": 3},
+        "bounds": {"lat_min": -57.0, "lat_max": 15.0, "lon_min": -92.0, "lon_max": -30.0},
+    },
+    "Africa": {
+        "summary": "North and sub-Saharan African orbital subpoint coverage.",
+        "center": {"lat": 4.0, "lon": 20.0, "zoom": 3},
+        "bounds": {"lat_min": -35.0, "lat_max": 38.0, "lon_min": -20.0, "lon_max": 55.0},
+    },
+    "Oceania": {
+        "summary": "Australian, Coral Sea, and South Pacific regional focus.",
+        "center": {"lat": -24.0, "lon": 135.0, "zoom": 4},
+        "bounds": {"lat_min": -50.0, "lat_max": 5.0, "lon_min": 110.0, "lon_max": 180.0},
+    },
+}
+
 CATEGORY_COLORS = {
     "Stations": "#7dd3fc",
     "Navigation": "#58a6ff",
@@ -102,6 +140,13 @@ def inject_styles():
             .stTabs [data-baseweb="tab-list"] { gap:.6rem; }
             .stTabs [data-baseweb="tab"] { border-radius:999px; background:rgba(15,31,49,.7); border:1px solid var(--stroke); color:var(--text-main); padding-left:1rem; padding-right:1rem; }
             .stDataFrame, div[data-testid="stTable"] { border-radius:18px; overflow:hidden; border:1px solid var(--stroke); }
+            .region-card { border:1px solid var(--stroke); background:linear-gradient(180deg, rgba(10,23,37,.92), rgba(14,31,49,.84)); border-radius:20px; padding:1rem 1rem .9rem 1rem; box-shadow:0 12px 28px rgba(4,9,18,.22); min-height:168px; margin-bottom:.65rem; }
+            .region-card-active { border-color:rgba(132,215,255,.45); box-shadow:0 16px 34px rgba(56,189,248,.14); }
+            .region-chip { display:inline-block; padding:.24rem .6rem; border-radius:999px; font-size:.72rem; font-weight:700; letter-spacing:.03rem; margin-bottom:.75rem; color:#f4fbff; }
+            .region-name { font-size:1.05rem; font-weight:700; color:var(--text-main); margin-bottom:.28rem; }
+            .region-copy { font-size:.9rem; color:var(--text-soft); line-height:1.45; }
+            div[data-testid="stButton"] > button { min-height:2.7rem; border-radius:14px; border:1px solid var(--stroke); background:linear-gradient(180deg, rgba(15,31,49,.9), rgba(11,23,36,.92)); color:var(--text-main); font-weight:700; box-shadow:0 10px 24px rgba(4,9,18,.18); }
+            div[data-testid="stButton"] > button:hover { border-color:rgba(132,215,255,.45); color:#ffffff; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -116,6 +161,24 @@ def render_metric_card(title, value, detail, accent):
             <div class="metric-label">{title}</div>
             <div class="metric-value">{value}</div>
             <div class="metric-detail">{detail}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_region_card(region_name, active_region):
+    active = region_name == active_region
+    accent = "#38bdf8" if active else "#7dd3fc"
+    chip_text = "Focused region" if active else "Regional focus"
+    classes = "region-card region-card-active" if active else "region-card"
+    summary = REGION_SCOPES[region_name]["summary"]
+    st.markdown(
+        f"""
+        <div class="{classes}">
+            <div class="region-chip" style="background:{accent};">{html.escape(chip_text.upper())}</div>
+            <div class="region-name">{html.escape(region_name)}</div>
+            <div class="region-copy">{html.escape(summary)}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -442,6 +505,8 @@ def init_session_state():
         st.session_state["satellite_loaded_track_window"] = None
     if "satellite_loaded_track_step" not in st.session_state:
         st.session_state["satellite_loaded_track_step"] = None
+    if "satellite_focus_region" not in st.session_state:
+        st.session_state["satellite_focus_region"] = "Global"
 
 
 def apply_filters(df, search_query, regimes):
@@ -453,6 +518,19 @@ def apply_filters(df, search_query, regimes):
     else:
         filtered = filtered.iloc[0:0]
     return filtered.reset_index(drop=True)
+
+
+def region_filter(df, region_name):
+    if df.empty or region_name == "Global":
+        return df.copy()
+
+    bounds = REGION_SCOPES[region_name]["bounds"]
+    return df[
+        (df["latitude"] >= bounds["lat_min"])
+        & (df["latitude"] <= bounds["lat_max"])
+        & (df["longitude"] >= bounds["lon_min"])
+        & (df["longitude"] <= bounds["lon_max"])
+    ].reset_index(drop=True)
 
 
 def popup_html(row):
@@ -498,11 +576,18 @@ def satellite_icon_html(row, show_label):
     """
 
 
-def create_map(df, map_theme, show_tracks, show_labels):
+def create_map(df, map_theme, show_tracks, show_labels, focus_region):
     coords = df.dropna(subset=["latitude", "longitude"]).copy()
     if coords.empty:
         return None, False
-    satellite_map = folium.Map(location=[16, 0], zoom_start=2, control_scale=True, prefer_canvas=True, tiles=None)
+    center = REGION_SCOPES[focus_region]["center"]
+    satellite_map = folium.Map(
+        location=[center["lat"], center["lon"]],
+        zoom_start=center["zoom"],
+        control_scale=True,
+        prefer_canvas=True,
+        tiles=None,
+    )
     for theme_name, theme_config in MAP_THEMES.items():
         folium.TileLayer(tiles=theme_config["tiles"], attr=theme_config["attr"], name=theme_name, show=theme_name == map_theme).add_to(satellite_map)
     Fullscreen(position="topright").add_to(satellite_map)
@@ -566,6 +651,38 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+focus_region = st.session_state["satellite_focus_region"]
+
+st.markdown(
+    """
+    <div class="panel-card">
+        <div class="panel-title">Regional Focus</div>
+        <div class="panel-copy">
+            Pick the part of the world you want to watch. The radar map and the visible satellite list
+            will focus on the selected region so the page is easier to read.
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+region_rows = [
+    ["Global", "Europe", "Asia", "North America"],
+    ["South America", "Africa", "Oceania"],
+]
+
+for region_row in region_rows:
+    columns = st.columns(len(region_row), gap="large")
+    for column, region_name in zip(columns, region_row):
+        with column:
+            render_region_card(region_name, focus_region)
+            button_label = f"Focus {region_name}" if focus_region != region_name else f"Focused: {region_name}"
+            if st.button(button_label, key=f"focus_region_{region_name}", use_container_width=True):
+                st.session_state["satellite_focus_region"] = region_name
+                st.rerun()
+
+st.markdown("")
+
 with st.sidebar:
     st.markdown("### Radar Source")
     radar_mode = st.selectbox(
@@ -624,6 +741,7 @@ loaded_categories = st.session_state["satellite_loaded_categories"]
 loaded_limit = st.session_state["satellite_loaded_limit"]
 loaded_track_window = st.session_state["satellite_loaded_track_window"]
 loaded_track_step = st.session_state["satellite_loaded_track_step"]
+focus_region = st.session_state["satellite_focus_region"]
 
 if satellites_df.empty:
     st.markdown(
@@ -631,7 +749,7 @@ if satellites_df.empty:
         <div class="panel-card">
             <div class="panel-title">Radar Ready</div>
             <div class="panel-copy">
-                Choose a satellite load mode in the sidebar and click <b>Load radar</b>.
+                Pick a region above, then choose a satellite load mode in the sidebar and click <b>Load radar</b>.
                 Quick snapshot is the fastest option and is recommended when the larger public feeds are slow.
             </div>
         </div>
@@ -640,20 +758,20 @@ if satellites_df.empty:
     )
     st.stop()
 
-filtered_df = apply_filters(satellites_df, search_query, regimes)
+regional_df = region_filter(satellites_df, focus_region)
+filtered_df = apply_filters(regional_df, search_query, regimes)
 priority_df = filtered_df.sort_values(["priority_rank", "altitude_km", "name"]).head(20).copy() if not filtered_df.empty else pd.DataFrame()
 military_df = filtered_df[filtered_df["category"] == "Military"].copy() if not filtered_df.empty else pd.DataFrame()
-navigation_df = filtered_df[filtered_df["category"] == "Navigation"].copy() if not filtered_df.empty else pd.DataFrame()
 
 metric_columns = st.columns(5)
 with metric_columns[0]:
-    render_metric_card("Objects loaded", f"{len(satellites_df):,}", "Loaded from the selected public orbital feeds", "#38bdf8")
+    render_metric_card("Focus region", focus_region, REGION_SCOPES[focus_region]["summary"], "#38bdf8")
 with metric_columns[1]:
-    render_metric_card("Objects in view", f"{len(filtered_df):,}", "Search and orbit filtered satellite set", "#7dd3fc")
+    render_metric_card("Objects in scope", f"{len(regional_df):,}", "Satellites currently over the selected region", "#7dd3fc")
 with metric_columns[2]:
-    render_metric_card("Military watch", f"{len(military_df):,}", "Public military catalogue objects in view", "#ff5f6d")
+    render_metric_card("Objects in view", f"{len(filtered_df):,}", "Region, search, and orbit filtered set", "#58a6ff")
 with metric_columns[3]:
-    render_metric_card("Navigation watch", f"{len(navigation_df):,}", "PNT constellation objects in view", "#58a6ff")
+    render_metric_card("Military watch", f"{len(military_df):,}", "Public military catalogue objects in view", "#ff5f6d")
 with metric_columns[4]:
     if data_source == "live":
         render_metric_card("Feed status", "Live", format_time(loaded_at_iso), "#39d98a")
@@ -671,17 +789,17 @@ with map_col:
         <div class="panel-card">
             <div class="panel-title">Orbital Radar Map</div>
             <div class="panel-copy">
-                The radar map plots public satellite subpoints on a world view. Dashed tracks show a short
-                forward and backward ground-track window from the selected public orbital elements.
+                The radar map is centered on the selected region and shows satellites whose current subpoints
+                are inside that regional focus. Dashed tracks show a short forward and backward ground-track window.
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
     if filtered_df.empty:
-        st.info("No satellites match the current search and orbit filters.")
+        st.info("No satellites are currently visible over the selected region under the active filters.")
     else:
-        orbital_map, labels_used = create_map(filtered_df, map_theme, show_tracks, show_labels)
+        orbital_map, labels_used = create_map(filtered_df, map_theme, show_tracks, show_labels, focus_region)
         if orbital_map is None:
             st.info("No satellite positions are available for the current view.")
         else:
@@ -702,6 +820,7 @@ with side_col:
                 {'Live public orbital feed' if data_source == 'live' else 'Official public snapshot fallback' if data_source == 'snapshot' else 'Demo orbital fallback'}<br>
                 Loaded at: {html.escape(format_time(loaded_at_iso))}<br>
                 Loaded mode: {html.escape(safe_str(loaded_mode or 'Unknown'))}<br>
+                Focus region: {html.escape(focus_region)}<br>
                 Categories: {html.escape(", ".join(loaded_categories) if loaded_categories else 'Unknown')}<br>
                 Public feeds: {html.escape(feed_text)}<br>
                 Track profile: {html.escape(f"{loaded_track_window} min / {loaded_track_step} min step" if loaded_track_window and loaded_track_step else "Unknown")}
@@ -716,9 +835,9 @@ with side_col:
         <div class="panel-card">
             <div class="panel-title">How to read this radar</div>
             <div class="panel-copy">
-                Positions are derived from public TLE data. LEO tracks move fastest across the map,
-                MEO objects dominate navigation constellations, and GEO satellites stay close to fixed longitudes.
-                This is a public tracking picture, not a classified sensor feed.
+                Positions are derived from public TLE data. The regional focus clips the radar to satellites
+                whose current subpoints are over that part of the world. LEO tracks move fastest across the map,
+                while GEO satellites stay close to fixed longitudes.
             </div>
         </div>
         """,
