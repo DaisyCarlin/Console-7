@@ -1,12 +1,5 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-import pandas as pd
-import streamlit as st
-rom __future__ import annotations
-
 import os
 import sys
 from pathlib import Path
@@ -24,14 +17,6 @@ st.set_page_config(page_title="Strategic Insights", layout="wide")
 
 st.write("CSV PATH:", EVENTS_CSV_PATH)
 st.write("FILE EXISTS:", os.path.exists(EVENTS_CSV_PATH))
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.append(str(PROJECT_ROOT))
-
-from utils.event_logger import EVENT_COLUMNS, EVENTS_CSV_PATH
-
-st.set_page_config(page_title="Strategic Insights", layout="wide")
 
 
 def inject_styles() -> None:
@@ -151,7 +136,8 @@ def load_events() -> pd.DataFrame:
 
     try:
         events_df = pd.read_csv(EVENTS_CSV_PATH, dtype=str)
-    except Exception:
+    except Exception as error:
+        st.error(f"Could not read events CSV: {error}")
         return empty_events_frame()
 
     for column in EVENT_COLUMNS:
@@ -426,6 +412,8 @@ st.markdown(
 )
 
 events_df = load_events()
+st.write("ROWS LOADED:", len(events_df))
+
 event_type_options = sorted(
     [event_type for event_type in events_df["event_type"].dropna().unique().tolist() if str(event_type).strip()]
 )
