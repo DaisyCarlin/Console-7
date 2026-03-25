@@ -964,6 +964,7 @@ st.caption(
     f"{len(filtered_sensitive_df):,} sensitive launch profiles under the current filters."
 )
 
+
 from utils.event_logger import log_event
 
 def save_launch_event(launch):
@@ -983,3 +984,6 @@ def save_launch_event(launch):
             "subcategory": subcategory,
             "source": "launch_feed",
             "sensitive": False,
+        }
+    )
+            
