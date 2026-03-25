@@ -1,0 +1,101 @@
+import streamlit as st
+import pandas as pd
+import requests
+import plotly.express as px
+
+st.set_page_config(page_title="Satellite Activity", layout="wide")
+
+st.title("🛰 Satellite Activity Intelligence")
+
+# --------------------------
+# DATA SOURCES
+# --------------------------
+
+LAUNCH_API = "https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit=20"
+DECAY_API = "https://celestrak.org/NORAD/elements/active.txt"
+
+UCS_CSV = "https://raw.githubusercontent.com/mtinker6/ucs-satellite-database/main/ucs_satellites.csv"
+
+# --------------------------
+# LOAD UPCOMING LAUNCHES
+# --------------------------
+
+@st.cache_data(ttl=1800)
+def load_launches():
+    r = requests.get(LAUNCH_API)
+    data = r.json()["results"]
+
+    rows = []
+
+    for l in data:
+        rows.append({
+            "name": l["name"],
+            "provider": l["launch_service_provider"]["name"] if l["launch_service_provider"] else "Unknown",
+            "country": l["pad"]["location"]["country_code"] if l["pad"] else "Unknown",
+            "net": l["net"],
+            "mission": l["mission"]["type"] if l["mission"] else "Unknown"
+        })
+
+    return pd.DataFrame(rows)
+
+# --------------------------
+# LOAD UCS SATELLITE DB
+# --------------------------
+
+@st.cache_data(ttl=86400)
+def load_ucs():
+    df = pd.read_csv(UCS_CSV)
+    df = df[["Country of Operator/Owner","Users","Purpose"]]
+    df.columns = ["country","users","purpose"]
+    return df
+
+# --------------------------
+# LOAD ACTIVE SATELLITES
+# --------------------------
+
+@st.cache_data(ttl=86400)
+def load_active():
+    r = requests.get(DECAY_API)
+    lines = r.text.splitlines()
+
+    names = lines[::3]
+    return pd.DataFrame({"satellite": names})
+
+# --------------------------
+# UI LAYOUT
+# --------------------------
+
+launches = load_launches()
+ucs = load_ucs()
+active = load_active()
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🚀 Upcoming Launches",
+    "🛰 Orbital Population",
+    "📉 Recently Inactive",
+    "🧠 Strategic Insights"
+])
+
+# --------------------------
+# UPCOMING LAUNCHES TAB
+# --------------------------
+
+with tab1:
+
+    st.subheader("Upcoming Launches")
+
+    if launches.empty:
+        st.warning("No launch data available")
+    else:
+        st.dataframe(launches, use_container_width=True)
+
+        country_counts = launches["country"].value_counts().reset_index()
+        country_counts.columns = ["country","launches"]
+
+        fig = px.bar(
+            country_counts,
+            x="country",
+            y="launches",
+            title="Launch Activity by Country"
+        )
+        st.plotly_chart(fig, use_container_width=True)
