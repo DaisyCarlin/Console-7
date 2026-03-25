@@ -1319,3 +1319,19 @@ st.caption(
     f"Tracking {len(all_flights_df):,} flights, with {len(emergency_df):,} emergency squawks, "
     f"{len(military_df):,} military heuristic matches, and {len(no_callsign_df):,} no-callsign flights."
 )
+
+# STRAT INSIGHTS 
+
+    from utils.event_logger import log_event
+
+log_event(
+    {
+        "event_id": "2026-03-25_US_military_flight_air_force_1",
+        "timestamp": "2026-03-25T14:32:00Z",
+        "country": "United States",
+        "event_type": "military_flight",
+        "subcategory": "air_force",
+        "source": "adsb",
+        "sensitive": True,
+    }
+)
