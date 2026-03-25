@@ -98,4 +98,39 @@ with tab1:
             y="launches",
             title="Launch Activity by Country"
         )
-        st.plotly_chart(fig, use_container_width=T
+        st.plotly_chart(fig, use_container_width=True)
+
+# --------------------------
+# ORBITAL POPULATION TAB
+# --------------------------
+
+with tab2:
+
+    st.subheader("Orbital Population (UCS Database)")
+
+    pop = ucs["country"].value_counts().reset_index()
+    pop.columns = ["country","satellites"]
+
+    st.dataframe(pop, use_container_width=True)
+
+    fig = px.bar(
+        pop.head(15),
+        x="country",
+        y="satellites",
+        title="Top Satellite Operators"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+# --------------------------
+# INACTIVE / DECAY TAB
+# --------------------------
+
+with tab3:
+
+    st.subheader("Recently Observed Active Satellites")
+
+    st.info(
+        "This shows satellites currently present in active orbital catalogues."
+    )
+
+    st.dataframe(active.head(50), use_container_width=True)
