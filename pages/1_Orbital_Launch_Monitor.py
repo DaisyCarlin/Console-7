@@ -963,3 +963,23 @@ st.caption(
     f"Loaded {len(filtered_upcoming_df):,} upcoming launches, {len(filtered_failed_df):,} recent failures, and "
     f"{len(filtered_sensitive_df):,} sensitive launch profiles under the current filters."
 )
+
+from utils.event_logger import log_event
+
+def save_launch_event(launch):
+    mission_name = str(launch.get("name", "")).strip() or "unknown-launch"
+    country = str(launch.get("country", "")).strip() or "Unknown"
+    launch_time = launch.get("window_start") or launch.get("net")
+    subcategory = "orbital_launch"
+
+    event_id = f"launch_{mission_name}_{launch_time}"
+
+    log_event(
+        {
+            "event_id": event_id,
+            "timestamp": launch_time,
+            "country": country,
+            "event_type": "launch",
+            "subcategory": subcategory,
+            "source": "launch_feed",
+            "sensitive": False,
