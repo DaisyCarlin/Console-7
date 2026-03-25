@@ -1,29 +1,29 @@
-import html
-import math
-from datetime import datetime, timedelta, timezone
-
-import folium
 import pandas as pd
 import requests
 import streamlit as st
 from folium.features import DivIcon
 from folium.plugins import Fullscreen, MousePosition
+from requests.adapters import HTTPAdapter
+from sgp4 import omm
 from sgp4.api import Satrec, jday
 from streamlit_folium import st_folium
+from urllib3.util.retry import Retry
 
-st.set_page_config(page_title="Satellite Radar", layout="wide")
+st.set_page_config(page_title="Space Radar", layout="wide")
 
-CELESTRAK_ENDPOINTS = [
-    "https://celestrak.org/NORAD/elements/gp.php",
-    "https://www.celestrak.org/NORAD/elements/gp.php",
-]
-CONNECT_TIMEOUT_SECONDS = 8
-READ_TIMEOUT_SECONDS = 12
-REQUEST_RETRIES = 2
-TLE_CACHE_TTL_SECONDS = 7200
-QUICK_CONNECT_TIMEOUT_SECONDS = 4
-QUICK_READ_TIMEOUT_SECONDS = 6
-QUICK_REQUEST_RETRIES = 1
+SPACE_TRACK_LOGIN_URL = "https://www.space-track.org/ajaxauth/login"
+SPACE_TRACK_GP_URL = (
+    "https://www.space-track.org/basicspacedata/query/"
+    "class/gp/"
+    "decay_date/null-val/"
+    "epoch/%3Enow-10/"
+    "orderby/norad_cat_id/"
+    "format/json"
+)
+
+REQUEST_TIMEOUT_SECONDS = 20
+QUERY_CACHE_TTL_SECONDS = 3600
+DISK_CACHE_FILE = "spacetrack_gp_cache.pkl"
 
 MAP_THEMES = {
     "Light": {"tiles": "CartoDB positron", "attr": None},
@@ -34,53 +34,6 @@ MAP_THEMES = {
     "Dark": {"tiles": "CartoDB dark_matter", "attr": None},
 }
 
-SATELLITE_GROUPS = {
-    "Stations": [("stations", "Crewed and station assets")],
-    "Navigation": [("gps-ops", "GPS operational"), ("galileo", "Galileo"), ("glo-ops", "GLONASS")],
-    "Weather": [("weather", "Weather satellites"), ("noaa", "NOAA weather"), ("goes", "GOES weather")],
-    "Earth Observation": [("resource", "Earth observation"), ("science", "Science missions")],
-    "Communications": [("geo", "GEO communications"), ("iridium", "Iridium")],
-    "Military": [("military", "Public military catalogue")],
-}
-
-REGION_SCOPES = {
-    "Global": {
-        "summary": "Full world orbital picture with no regional clipping.",
-        "center": {"lat": 16.0, "lon": 0.0, "zoom": 2},
-        "bounds": None,
-    },
-    "Europe": {
-        "summary": "North Sea, Mediterranean, Baltic, and continental European passes.",
-        "center": {"lat": 52.0, "lon": 12.0, "zoom": 4},
-        "bounds": {"lat_min": 34.0, "lat_max": 72.0, "lon_min": -25.0, "lon_max": 45.0},
-    },
-    "Asia": {
-        "summary": "Middle East to Western Pacific orbital subpoint coverage.",
-        "center": {"lat": 30.0, "lon": 95.0, "zoom": 3},
-        "bounds": {"lat_min": 0.0, "lat_max": 78.0, "lon_min": 25.0, "lon_max": 180.0},
-    },
-    "North America": {
-        "summary": "North Atlantic, Pacific approaches, and continental North America.",
-        "center": {"lat": 38.0, "lon": -98.0, "zoom": 3},
-        "bounds": {"lat_min": 7.0, "lat_max": 72.0, "lon_min": -170.0, "lon_max": -50.0},
-    },
-    "South America": {
-        "summary": "Atlantic, Pacific, and southern cone regional view.",
-        "center": {"lat": -15.0, "lon": -60.0, "zoom": 3},
-        "bounds": {"lat_min": -57.0, "lat_max": 15.0, "lon_min": -92.0, "lon_max": -30.0},
-    },
-    "Africa": {
-        "summary": "North and sub-Saharan African orbital subpoint coverage.",
-        "center": {"lat": 4.0, "lon": 20.0, "zoom": 3},
-        "bounds": {"lat_min": -35.0, "lat_max": 38.0, "lon_min": -20.0, "lon_max": 55.0},
-    },
-    "Oceania": {
-        "summary": "Australian, Coral Sea, and South Pacific regional focus.",
-        "center": {"lat": -24.0, "lon": 135.0, "zoom": 4},
-        "bounds": {"lat_min": -50.0, "lat_max": 5.0, "lon_min": 110.0, "lon_max": 180.0},
-    },
-}
-
 CATEGORY_COLORS = {
     "Stations": "#7dd3fc",
     "Navigation": "#58a6ff",
@@ -88,33 +41,19 @@ CATEGORY_COLORS = {
     "Earth Observation": "#ffb454",
     "Communications": "#14b8a6",
     "Military": "#ff5f6d",
+    "Science": "#c084fc",
+    "Other": "#94a3b8",
 }
 
-CATEGORY_NOTES = {
-    "Stations": "Crewed platforms and station-linked objects.",
-    "Navigation": "Timing, positioning, and navigation constellations.",
-    "Weather": "Meteorology and environmental monitoring satellites.",
-    "Earth Observation": "Imaging, mapping, and science missions.",
-    "Communications": "Relay and telecom spacecraft in orbit.",
-    "Military": "Publicly catalogued defence and government-linked satellites.",
-}
-
-DEMO_SATELLITES = [
-    ("ISS DEMO TRACK", "25544", "Stations", "Crewed and station assets", 19.0, -38.0, 418.0, 7.67, "LEO"),
-    ("GPS DEMO VEHICLE", "32711", "Navigation", "GPS operational", 11.0, 74.0, 20190.0, 3.88, "MEO"),
-    ("NOAA DEMO ORBITER", "33591", "Weather", "NOAA weather", -61.0, 109.0, 865.0, 7.42, "LEO"),
-    ("LANDSAT DEMO", "39084", "Earth Observation", "Earth observation", 35.0, 126.0, 705.0, 7.48, "LEO"),
-    ("GEO DEMO RELAY", "41866", "Communications", "GEO communications", 0.2, -16.0, 35786.0, 3.07, "GEO"),
-    ("MILITARY DEMO WATCH", "43075", "Military", "Public military catalogue", 24.0, -132.0, 1090.0, 7.28, "LEO"),
-]
-
-OFFICIAL_WATCHLIST = {
-    "Stations": [("25544", "Crewed and station assets")],
-    "Navigation": [("32711", "GPS operational")],
-    "Weather": [("33591", "NOAA weather"), ("41866", "GOES weather")],
-    "Earth Observation": [("25994", "Earth observation"), ("27424", "Earth observation")],
-    "Communications": [("19548", "Relay communications")],
-    "Military": [("2826", "Public military watch"), ("39490", "Public military watch")],
+PRIORITY_RANKS = {
+    "Stations": 0,
+    "Military": 1,
+    "Navigation": 2,
+    "Weather": 3,
+    "Earth Observation": 4,
+    "Communications": 5,
+    "Science": 6,
+    "Other": 7,
 }
 
 
@@ -122,31 +61,103 @@ def inject_styles():
     st.markdown(
         """
         <style>
-            :root { --bg-0:#07111f; --bg-1:#0d1b2a; --stroke:rgba(130,161,191,.22); --text-main:#e8f1fb; --text-soft:#91a9c3; }
-            .stApp { background:radial-gradient(circle at top left, rgba(56,189,248,.16), transparent 28%), radial-gradient(circle at top right, rgba(88,166,255,.12), transparent 26%), linear-gradient(180deg, var(--bg-0) 0%, var(--bg-1) 100%); color:var(--text-main); font-family:"Aptos","Segoe UI",sans-serif; }
-            [data-testid="stSidebar"] { background:linear-gradient(180deg, rgba(9,19,32,.97), rgba(9,19,32,.92)); border-right:1px solid var(--stroke); }
+            :root {
+                --bg-0:#07111f;
+                --bg-1:#0d1b2a;
+                --stroke:rgba(130,161,191,.22);
+                --text-main:#e8f1fb;
+                --text-soft:#91a9c3;
+            }
+            .stApp {
+                background:
+                    radial-gradient(circle at top left, rgba(56,189,248,.16), transparent 28%),
+                    radial-gradient(circle at top right, rgba(88,166,255,.12), transparent 26%),
+                    linear-gradient(180deg, var(--bg-0) 0%, var(--bg-1) 100%);
+                color:var(--text-main);
+                font-family:"Aptos","Segoe UI",sans-serif;
+            }
+            [data-testid="stSidebar"] {
+                background:linear-gradient(180deg, rgba(9,19,32,.97), rgba(9,19,32,.92));
+                border-right:1px solid var(--stroke);
+            }
             [data-testid="stSidebar"] * { color:var(--text-main); }
-            .hero-card,.panel-card,.metric-card { border:1px solid var(--stroke); border-radius:22px; box-shadow:0 12px 28px rgba(4,9,18,.22); }
-            .hero-card { background:linear-gradient(145deg, rgba(10,21,35,.92), rgba(15,31,49,.86)); padding:1.35rem 1.5rem; margin-bottom:1rem; }
-            .panel-card { background:linear-gradient(180deg, rgba(10,23,37,.9), rgba(14,31,49,.82)); padding:1rem 1rem .85rem 1rem; }
-            .metric-card { background:linear-gradient(180deg, rgba(12,24,39,.9), rgba(14,32,50,.76)); padding:1rem 1rem .95rem 1rem; min-height:120px; }
-            .hero-kicker { letter-spacing:.16rem; font-size:.72rem; font-weight:700; color:#84d7ff; margin-bottom:.4rem; }
-            .hero-title { font-size:2.2rem; line-height:1.05; font-weight:700; margin:0; color:var(--text-main); }
-            .hero-copy,.panel-copy,.metric-detail { color:var(--text-soft); font-size:.94rem; }
-            .metric-label { font-size:.8rem; text-transform:uppercase; letter-spacing:.08rem; color:var(--text-soft); margin-bottom:.45rem; }
-            .metric-value { font-size:2rem; font-weight:700; line-height:1; margin-bottom:.35rem; color:var(--text-main); }
-            .accent-bar { width:54px; height:4px; border-radius:999px; margin-bottom:.8rem; }
-            .panel-title { font-size:1rem; font-weight:700; margin-bottom:.25rem; color:var(--text-main); }
+            .hero-card,.panel-card,.metric-card {
+                border:1px solid var(--stroke);
+                border-radius:22px;
+                box-shadow:0 12px 28px rgba(4,9,18,.22);
+            }
+            .hero-card {
+                background:linear-gradient(145deg, rgba(10,21,35,.92), rgba(15,31,49,.86));
+                padding:1.35rem 1.5rem;
+                margin-bottom:1rem;
+            }
+            .panel-card {
+                background:linear-gradient(180deg, rgba(10,23,37,.9), rgba(14,31,49,.82));
+                padding:1rem 1rem .85rem 1rem;
+            }
+            .metric-card {
+                background:linear-gradient(180deg, rgba(12,24,39,.9), rgba(14,32,50,.76));
+                padding:1rem 1rem .95rem 1rem;
+                min-height:120px;
+            }
+            .hero-kicker {
+                letter-spacing:.16rem;
+                font-size:.72rem;
+                font-weight:700;
+                color:#84d7ff;
+                margin-bottom:.4rem;
+            }
+            .hero-title {
+                font-size:2.2rem;
+                line-height:1.05;
+                font-weight:700;
+                margin:0;
+                color:var(--text-main);
+            }
+            .hero-copy,.panel-copy,.metric-detail {
+                color:var(--text-soft);
+                font-size:.94rem;
+            }
+            .metric-label {
+                font-size:.8rem;
+                text-transform:uppercase;
+                letter-spacing:.08rem;
+                color:var(--text-soft);
+                margin-bottom:.45rem;
+            }
+            .metric-value {
+                font-size:2rem;
+                font-weight:700;
+                line-height:1;
+                margin-bottom:.35rem;
+                color:var(--text-main);
+            }
+            .accent-bar {
+                width:54px;
+                height:4px;
+                border-radius:999px;
+                margin-bottom:.8rem;
+            }
+            .panel-title {
+                font-size:1rem;
+                font-weight:700;
+                margin-bottom:.25rem;
+                color:var(--text-main);
+            }
             .stTabs [data-baseweb="tab-list"] { gap:.6rem; }
-            .stTabs [data-baseweb="tab"] { border-radius:999px; background:rgba(15,31,49,.7); border:1px solid var(--stroke); color:var(--text-main); padding-left:1rem; padding-right:1rem; }
-            .stDataFrame, div[data-testid="stTable"] { border-radius:18px; overflow:hidden; border:1px solid var(--stroke); }
-            .region-card { border:1px solid var(--stroke); background:linear-gradient(180deg, rgba(10,23,37,.92), rgba(14,31,49,.84)); border-radius:20px; padding:1rem 1rem .9rem 1rem; box-shadow:0 12px 28px rgba(4,9,18,.22); min-height:168px; margin-bottom:.65rem; }
-            .region-card-active { border-color:rgba(132,215,255,.45); box-shadow:0 16px 34px rgba(56,189,248,.14); }
-            .region-chip { display:inline-block; padding:.24rem .6rem; border-radius:999px; font-size:.72rem; font-weight:700; letter-spacing:.03rem; margin-bottom:.75rem; color:#f4fbff; }
-            .region-name { font-size:1.05rem; font-weight:700; color:var(--text-main); margin-bottom:.28rem; }
-            .region-copy { font-size:.9rem; color:var(--text-soft); line-height:1.45; }
-            div[data-testid="stButton"] > button { min-height:2.7rem; border-radius:14px; border:1px solid var(--stroke); background:linear-gradient(180deg, rgba(15,31,49,.9), rgba(11,23,36,.92)); color:var(--text-main); font-weight:700; box-shadow:0 10px 24px rgba(4,9,18,.18); }
-            div[data-testid="stButton"] > button:hover { border-color:rgba(132,215,255,.45); color:#ffffff; }
+            .stTabs [data-baseweb="tab"] {
+                border-radius:999px;
+                background:rgba(15,31,49,.7);
+                border:1px solid var(--stroke);
+                color:var(--text-main);
+                padding-left:1rem;
+                padding-right:1rem;
+            }
+            .stDataFrame, div[data-testid="stTable"] {
+                border-radius:18px;
+                overflow:hidden;
+                border:1px solid var(--stroke);
+            }
         </style>
         """,
         unsafe_allow_html=True,
@@ -161,24 +172,6 @@ def render_metric_card(title, value, detail, accent):
             <div class="metric-label">{title}</div>
             <div class="metric-value">{value}</div>
             <div class="metric-detail">{detail}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_region_card(region_name, active_region):
-    active = region_name == active_region
-    accent = "#38bdf8" if active else "#7dd3fc"
-    chip_text = "Focused region" if active else "Regional focus"
-    classes = "region-card region-card-active" if active else "region-card"
-    summary = REGION_SCOPES[region_name]["summary"]
-    st.markdown(
-        f"""
-        <div class="{classes}">
-            <div class="region-chip" style="background:{accent};">{html.escape(chip_text.upper())}</div>
-            <div class="region-name">{html.escape(region_name)}</div>
-            <div class="region-copy">{html.escape(summary)}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -204,309 +197,236 @@ def orbit_regime(altitude_km):
     return "HEO"
 
 
-def parse_tle_text(tle_text):
-    records = []
-    lines = [line.rstrip() for line in tle_text.splitlines() if line.strip()]
-    i = 0
-    while i < len(lines):
-        if i + 2 < len(lines) and not lines[i].startswith("1 ") and lines[i + 1].startswith("1 ") and lines[i + 2].startswith("2 "):
-            records.append({"name": lines[i], "line1": lines[i + 1], "line2": lines[i + 2], "norad_id": lines[i + 1][2:7].strip()})
-            i += 3
-            continue
-        if i + 1 < len(lines) and lines[i].startswith("1 ") and lines[i + 1].startswith("2 "):
-            records.append({"name": f"NORAD {lines[i][2:7].strip()}", "line1": lines[i], "line2": lines[i + 1], "norad_id": lines[i][2:7].strip()})
-            i += 2
-            continue
-        i += 1
-    return records
+def classify_satellite(name):
+    text = safe_str(name).upper()
+
+    if any(k in text for k in ["ISS", "TIANGONG", "CSS", "CREW", "SOYUZ", "PROGRESS"]):
+        return "Stations"
+    if any(k in text for k in ["GPS", "GALILEO", "GLONASS", "BEIDOU", "NAVSTAR", "QZSS", "IRNSS", "NAVIC"]):
+        return "Navigation"
+    if any(k in text for k in ["NOAA", "GOES", "METEOR", "HIMAWARI", "FENGYUN", "METOP", "DMSP"]):
+        return "Weather"
+    if any(k in text for k in ["LANDSAT", "SENTINEL", "TERRA", "AQUA", "WORLDVIEW", "PLEIADES", "SPOT", "KOMPSAT", "RESURS", "GAOFEN"]):
+        return "Earth Observation"
+    if any(k in text for k in ["STARLINK", "ONEWEB", "IRIDIUM", "INTELSAT", "SES", "EUTELSAT", "INMARSAT", "VIASAT", "TDRS", "O3B"]):
+        return "Communications"
+    if any(k in text for k in ["NROL", "USA ", "COSMOS", "YAOGAN", "KH-", "SBIRS", "AEHF", "MUOS", "MILSTAR"]):
+        return "Military"
+    if any(k in text for k in ["HUBBLE", "JWST", "XMM", "CHANDRAYAAN", "MARS", "LUNAR", "GAIA", "KEPLER"]):
+        return "Science"
+
+    return "Other"
 
 
-@st.cache_data(ttl=TLE_CACHE_TTL_SECONDS, show_spinner=False)
-def fetch_records(
-    query_key,
-    query_value,
-    connect_timeout=CONNECT_TIMEOUT_SECONDS,
-    read_timeout=READ_TIMEOUT_SECONDS,
-    retries=REQUEST_RETRIES,
-):
-    last_error = None
-    headers = {"User-Agent": "SignalConsole-SatelliteRadar/1.0"}
-    params = {query_key: query_value, "FORMAT": "tle"}
-
-    for endpoint in CELESTRAK_ENDPOINTS:
-        for _ in range(retries):
-            try:
-                response = requests.get(
-                    endpoint,
-                    params=params,
-                    timeout=(connect_timeout, read_timeout),
-                    headers=headers,
-                )
-                response.raise_for_status()
-                records = parse_tle_text(response.text)
-                if records:
-                    return records
-                last_error = RuntimeError(f"No records returned for {query_key}={query_value}.")
-            except requests.RequestException as error:
-                last_error = error
-
-    raise RuntimeError(f"CelesTrak request failed for {query_key}={query_value}: {last_error}")
-
-
-def fetch_group(group_name):
-    return fetch_records("GROUP", group_name)
-
-
-def fetch_catnr(catnr):
-    return fetch_records(
-        "CATNR",
-        catnr,
-        connect_timeout=QUICK_CONNECT_TIMEOUT_SECONDS,
-        read_timeout=QUICK_READ_TIMEOUT_SECONDS,
-        retries=QUICK_REQUEST_RETRIES,
+def build_session():
+    session = requests.Session()
+    retry = Retry(
+        total=2,
+        connect=2,
+        read=2,
+        backoff_factor=0.8,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "POST"],
+        raise_on_status=False,
     )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=8, pool_maxsize=8)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update({"User-Agent": "Console7-SpaceRadar/1.0"})
+    return session
 
 
 def to_julian(dt):
-    jd, fr = jday(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second + dt.microsecond / 1_000_000)
-    return jd, fr
+    return jday(
+        dt.year,
+        dt.month,
+        dt.day,
+        dt.hour,
+        dt.minute,
+        dt.second + dt.microsecond / 1_000_000,
+    )
 
 
 def sidereal_angle(jd_full):
     t = (jd_full - 2451545.0) / 36525.0
-    gmst_deg = 280.46061837 + 360.98564736629 * (jd_full - 2451545.0) + 0.000387933 * (t**2) - (t**3) / 38710000.0
+    gmst_deg = (
+        280.46061837
+        + 360.98564736629 * (jd_full - 2451545.0)
+        + 0.000387933 * (t**2)
+        - (t**3) / 38710000.0
+    )
     return math.radians(gmst_deg % 360.0)
 
 
 def eci_to_latlonalt(position_km, jd_full):
     x, y, z = position_km
     theta = sidereal_angle(jd_full)
+
     x_ecef = x * math.cos(theta) + y * math.sin(theta)
     y_ecef = -x * math.sin(theta) + y * math.cos(theta)
     z_ecef = z
+
     a = 6378.137
     f = 1 / 298.257223563
     e2 = f * (2 - f)
+
     lon = math.atan2(y_ecef, x_ecef)
     r = math.hypot(x_ecef, y_ecef)
     lat = math.atan2(z_ecef, r)
+
     for _ in range(6):
         n = a / math.sqrt(1 - e2 * math.sin(lat) ** 2)
         alt = r / max(math.cos(lat), 1e-9) - n
         lat = math.atan2(z_ecef, r * (1 - e2 * n / (n + alt)))
+
     n = a / math.sqrt(1 - e2 * math.sin(lat) ** 2)
     alt = r / max(math.cos(lat), 1e-9) - n
+
     return math.degrees(lat), ((math.degrees(lon) + 180) % 360) - 180, alt
 
 
-def propagate(line1, line2, dt):
-    sat = Satrec.twoline2rv(line1, line2)
-    jd, fr = to_julian(dt)
-    error, position_km, velocity_kms = sat.sgp4(jd, fr)
-    if error != 0:
+def propagate_from_record(record, dt):
+    try:
+        sat = Satrec()
+        omm.initialize(sat, record)
+        jd, fr = to_julian(dt)
+        error, position_km, velocity_kms = sat.sgp4(jd, fr)
+
+        if error != 0:
+            return None
+
+        lat, lon, alt = eci_to_latlonalt(position_km, jd + fr)
+        speed = math.sqrt(sum(v * v for v in velocity_kms))
+        return lat, lon, alt, speed
+    except Exception:
         return None
-    lat, lon, alt = eci_to_latlonalt(position_km, jd + fr)
-    speed = math.sqrt(sum(component * component for component in velocity_kms))
-    return lat, lon, alt, speed
-
-
-def split_segments(points):
-    segments, current = [], []
-    for point in points:
-        if not current or abs(point[1] - current[-1][1]) <= 180:
-            current.append(point)
-        else:
-            if len(current) > 1:
-                segments.append(current)
-            current = [point]
-    if len(current) > 1:
-        segments.append(current)
-    return segments
-
-
-def track_segments(line1, line2, now_utc, minutes, step_minutes):
-    points = []
-    for offset in range(-minutes, minutes + step_minutes, step_minutes):
-        state = propagate(line1, line2, now_utc + timedelta(minutes=offset))
-        if state:
-            points.append([state[0], state[1]])
-    return split_segments(points)
-
-
-def demo_tracks(mode_lat, mode_lon, regime):
-    points = []
-    for step in range(-6, 7):
-        if regime == "GEO":
-            lat = 0.4 * math.sin(math.radians(step * 20))
-            lon = ((mode_lon + step * 2) + 180) % 360 - 180
-        elif regime == "MEO":
-            lat = max(-55, min(55, mode_lat + 20 * math.sin(math.radians(step * 28))))
-            lon = ((mode_lon + step * 18) + 180) % 360 - 180
-        else:
-            lat = max(-75, min(75, mode_lat + 16 * math.sin(math.radians(step * 30))))
-            lon = ((mode_lon + step * 20) + 180) % 360 - 180
-        points.append([lat, lon])
-    return split_segments(points)
 
 
 def search_blob(row):
-    return " ".join([safe_str(row.get("name")), safe_str(row.get("norad_id")), safe_str(row.get("category")), safe_str(row.get("feed")), safe_str(row.get("orbit_regime"))]).lower()
+    return " ".join(
+        [
+            safe_str(row.get("name")),
+            safe_str(row.get("norad_id")),
+            safe_str(row.get("category")),
+            safe_str(row.get("object_type")),
+            safe_str(row.get("country")),
+            safe_str(row.get("orbit_regime")),
+        ]
+    ).lower()
 
 
-def build_live_dataset(categories, per_category_limit, track_window, track_step):
-    now_utc = datetime.now(timezone.utc)
-    rows, feeds = [], []
-    errors = []
-    for category in categories:
-        category_rows = []
-        for group_name, feed_label in SATELLITE_GROUPS.get(category, []):
-            try:
-                records = fetch_group(group_name)
-            except Exception as error:
-                errors.append(f"{group_name}: {error}")
-                continue
-
-            feeds.append(group_name)
-            for record in records:
-                state = propagate(record["line1"], record["line2"], now_utc)
-                if not state:
-                    continue
-                lat, lon, alt, speed = state
-                category_rows.append(
-                    {
-                        "name": record["name"],
-                        "norad_id": record["norad_id"],
-                        "category": category,
-                        "feed": feed_label,
-                        "latitude": lat,
-                        "longitude": lon,
-                        "altitude_km": alt,
-                        "speed_kms": speed,
-                        "orbit_regime": orbit_regime(alt),
-                        "track_segments": track_segments(record["line1"], record["line2"], now_utc, track_window, track_step),
-                    }
-                )
-        rows.extend(sorted(category_rows, key=lambda item: item["name"])[:per_category_limit])
-    if not rows:
-        detail = " | ".join(errors[:4]) if errors else "No usable records were returned."
-        raise RuntimeError(f"No public satellite tracks could be computed from the selected feeds. {detail}")
-    df = pd.DataFrame(rows)
-    df["marker_color"] = df["category"].map(CATEGORY_COLORS)
-    df["priority_rank"] = df["category"].map({"Stations": 0, "Military": 1, "Navigation": 2, "Weather": 3, "Earth Observation": 4, "Communications": 5}).fillna(99)
-    df["search_blob"] = df.apply(search_blob, axis=1)
-    return df.reset_index(drop=True), now_utc.isoformat(), sorted(set(feeds))
+def save_cache(df, loaded_at_iso, error_message):
+    payload = {
+        "df": df,
+        "loaded_at_iso": loaded_at_iso,
+        "error_message": error_message,
+    }
+    pd.to_pickle(payload, DISK_CACHE_FILE)
 
 
-def build_official_snapshot(categories, track_window, track_step):
-    now_utc = datetime.now(timezone.utc)
-    rows, feeds = [], []
-    errors = []
+def load_cache():
+    path = Path(DISK_CACHE_FILE)
+    if not path.exists():
+        return None
 
-    for category in categories:
-        for catnr, feed_label in OFFICIAL_WATCHLIST.get(category, []):
-            try:
-                records = fetch_catnr(catnr)
-            except Exception as error:
-                errors.append(f"{catnr}: {error}")
-                continue
-            if not records:
-                continue
-
-            record = records[0]
-            state = propagate(record["line1"], record["line2"], now_utc)
-            if not state:
-                continue
-
-            lat, lon, alt, speed = state
-            rows.append(
-                {
-                    "name": record["name"],
-                    "norad_id": record["norad_id"],
-                    "category": category,
-                    "feed": feed_label,
-                    "latitude": lat,
-                    "longitude": lon,
-                    "altitude_km": alt,
-                    "speed_kms": speed,
-                    "orbit_regime": orbit_regime(alt),
-                    "track_segments": track_segments(record["line1"], record["line2"], now_utc, track_window, track_step),
-                }
-            )
-            feeds.append(f"catnr-{catnr}")
-
-    if not rows:
-        detail = " | ".join(errors[:4]) if errors else "No usable watchlist records were returned."
-        raise RuntimeError(f"No official watchlist snapshot could be built from the public CATNR queries. {detail}")
-
-    df = pd.DataFrame(rows)
-    df["marker_color"] = df["category"].map(CATEGORY_COLORS)
-    df["priority_rank"] = df["category"].map({"Stations": 0, "Military": 1, "Navigation": 2, "Weather": 3, "Earth Observation": 4, "Communications": 5}).fillna(99)
-    df["search_blob"] = df.apply(search_blob, axis=1)
-    return df.reset_index(drop=True), now_utc.isoformat(), sorted(set(feeds))
-
-
-def build_demo_dataset(categories):
-    now_utc = datetime.now(timezone.utc)
-    rows = []
-    for name, norad_id, category, feed, lat, lon, alt, speed, regime in DEMO_SATELLITES:
-        if category not in categories:
-            continue
-        rows.append({"name": name, "norad_id": norad_id, "category": category, "feed": feed, "latitude": lat, "longitude": lon, "altitude_km": alt, "speed_kms": speed, "orbit_regime": regime, "track_segments": demo_tracks(lat, lon, regime)})
-    df = pd.DataFrame(rows if rows else [{"name": item[0], "norad_id": item[1], "category": item[2], "feed": item[3], "latitude": item[4], "longitude": item[5], "altitude_km": item[6], "speed_kms": item[7], "orbit_regime": item[8], "track_segments": demo_tracks(item[4], item[5], item[8])} for item in DEMO_SATELLITES])
-    df["marker_color"] = df["category"].map(CATEGORY_COLORS)
-    df["priority_rank"] = df["category"].map({"Stations": 0, "Military": 1, "Navigation": 2, "Weather": 3, "Earth Observation": 4, "Communications": 5}).fillna(99)
-    df["search_blob"] = df.apply(search_blob, axis=1)
-    return df.reset_index(drop=True), now_utc.isoformat(), ["demo-orbital-watch"]
-
-
-def load_dataset(categories, per_category_limit, track_window, track_step):
     try:
-        return (*build_live_dataset(tuple(categories), per_category_limit, track_window, track_step), "live", None)
-    except Exception as live_error:
-        try:
-            snapshot_df, loaded_at, feeds = build_official_snapshot(categories, track_window, track_step)
-            return snapshot_df, loaded_at, feeds, "snapshot", str(live_error)
-        except Exception as snapshot_error:
-            demo_df, loaded_at, feeds = build_demo_dataset(categories)
-            combined_error = f"{live_error} | Official snapshot fallback failed: {snapshot_error}"
-            return demo_df, loaded_at, feeds, "demo", combined_error
+        payload = pd.read_pickle(path)
+        df = payload.get("df")
+        if df is None or df.empty:
+            return None
+        return df, payload.get("loaded_at_iso"), payload.get("error_message")
+    except Exception:
+        return None
 
 
-def load_radar_data(mode, categories, per_category_limit, track_window, track_step):
-    if mode == "Quick snapshot":
-        try:
-            snapshot_df, loaded_at, feeds = build_official_snapshot(categories, track_window, track_step)
-            return snapshot_df, loaded_at, feeds, "snapshot", None
-        except Exception as snapshot_error:
-            demo_df, loaded_at, feeds = build_demo_dataset(categories)
-            return demo_df, loaded_at, feeds, "demo", str(snapshot_error)
+@st.cache_data(ttl=QUERY_CACHE_TTL_SECONDS, show_spinner=False)
+def fetch_spacetrack_gp(_identity, _password):
+    session = build_session()
 
-    return load_dataset(categories, per_category_limit, track_window, track_step)
+    login_response = session.post(
+        SPACE_TRACK_LOGIN_URL,
+        data={"identity": _identity, "password": _password},
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    login_response.raise_for_status()
+
+    response = session.get(SPACE_TRACK_GP_URL, timeout=REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+
+    payload = response.json()
+    if not isinstance(payload, list) or not payload:
+        raise RuntimeError("Space-Track returned no GP records.")
+
+    return payload
 
 
-def init_session_state():
-    if "satellite_df" not in st.session_state:
-        st.session_state["satellite_df"] = pd.DataFrame()
-    if "satellite_loaded_at_iso" not in st.session_state:
-        st.session_state["satellite_loaded_at_iso"] = None
-    if "satellite_loaded_feeds" not in st.session_state:
-        st.session_state["satellite_loaded_feeds"] = []
-    if "satellite_data_source" not in st.session_state:
-        st.session_state["satellite_data_source"] = "idle"
-    if "satellite_data_error" not in st.session_state:
-        st.session_state["satellite_data_error"] = None
-    if "satellite_loaded_mode" not in st.session_state:
-        st.session_state["satellite_loaded_mode"] = None
-    if "satellite_loaded_categories" not in st.session_state:
-        st.session_state["satellite_loaded_categories"] = []
-    if "satellite_loaded_limit" not in st.session_state:
-        st.session_state["satellite_loaded_limit"] = None
-    if "satellite_loaded_track_window" not in st.session_state:
-        st.session_state["satellite_loaded_track_window"] = None
-    if "satellite_loaded_track_step" not in st.session_state:
-        st.session_state["satellite_loaded_track_step"] = None
-    if "satellite_focus_region" not in st.session_state:
-        st.session_state["satellite_focus_region"] = "Global"
+def build_dataset(identity, password, selected_categories, limit_per_category):
+    now_utc = datetime.now(timezone.utc)
+    raw_records = fetch_spacetrack_gp(identity, password)
+
+    rows = []
+    for record in raw_records:
+        name = record.get("OBJECT_NAME") or f"NORAD {record.get('NORAD_CAT_ID', 'Unknown')}"
+        category = classify_satellite(name)
+
+        if category not in selected_categories:
+            continue
+
+        state = propagate_from_record(record, now_utc)
+        if not state:
+            continue
+
+        lat, lon, alt, speed = state
+
+        rows.append(
+            {
+                "name": name,
+                "norad_id": str(record.get("NORAD_CAT_ID", "")),
+                "category": category,
+                "object_type": record.get("OBJECT_TYPE", ""),
+                "country": record.get("COUNTRY_CODE", ""),
+                "launch_date": record.get("LAUNCH_DATE", ""),
+                "epoch": record.get("EPOCH", ""),
+                "latitude": lat,
+                "longitude": lon,
+                "altitude_km": alt,
+                "speed_kms": speed,
+                "orbit_regime": orbit_regime(alt),
+            }
+        )
+
+    if not rows:
+        raise RuntimeError("No propagatable satellite positions were produced for the current category selection.")
+
+    df = pd.DataFrame(rows)
+    df["marker_color"] = df["category"].map(CATEGORY_COLORS).fillna("#94a3b8")
+    df["priority_rank"] = df["category"].map(PRIORITY_RANKS).fillna(99)
+    df["search_blob"] = df.apply(search_blob, axis=1)
+
+    limited_frames = []
+    for category in selected_categories:
+        subset = df[df["category"] == category].sort_values(["name"]).head(limit_per_category)
+        if not subset.empty:
+            limited_frames.append(subset)
+
+    if limited_frames:
+        df = pd.concat(limited_frames, ignore_index=True)
+
+    loaded_at_iso = now_utc.isoformat()
+    save_cache(df, loaded_at_iso, None)
+    return df.reset_index(drop=True), loaded_at_iso
+
+
+def load_dataset(identity, password, selected_categories, limit_per_category):
+    try:
+        df, loaded_at_iso = build_dataset(identity, password, selected_categories, limit_per_category)
+        return df, loaded_at_iso, "live", None
+    except Exception as error:
+        cached = load_cache()
+        if cached is not None:
+            cached_df, cached_loaded_at, _ = cached
+            return cached_df, cached_loaded_at, "cached_live", str(error)
+        return pd.DataFrame(), None, "unavailable", str(error)
 
 
 def apply_filters(df, search_query, regimes):
@@ -515,22 +435,7 @@ def apply_filters(df, search_query, regimes):
         filtered = filtered[filtered["search_blob"].str.contains(search_query.lower(), na=False)]
     if regimes:
         filtered = filtered[filtered["orbit_regime"].isin(regimes)]
-    else:
-        filtered = filtered.iloc[0:0]
     return filtered.reset_index(drop=True)
-
-
-def region_filter(df, region_name):
-    if df.empty or region_name == "Global":
-        return df.copy()
-
-    bounds = REGION_SCOPES[region_name]["bounds"]
-    return df[
-        (df["latitude"] >= bounds["lat_min"])
-        & (df["latitude"] <= bounds["lat_max"])
-        & (df["longitude"] >= bounds["lon_min"])
-        & (df["longitude"] <= bounds["lon_max"])
-    ].reset_index(drop=True)
 
 
 def popup_html(row):
@@ -546,11 +451,12 @@ def popup_html(row):
                 </div>
             </div>
             <table style="width:100%; border-collapse:collapse; font-size:12px;">
-                <tr><td style="padding:4px 0; color:#5a6d85;">Feed</td><td style="padding:4px 0;">{html.escape(safe_str(row.get("feed") or "Unknown"))}</td></tr>
+                <tr><td style="padding:4px 0; color:#5a6d85;">Type</td><td style="padding:4px 0;">{html.escape(safe_str(row.get("object_type") or "Unknown"))}</td></tr>
+                <tr><td style="padding:4px 0; color:#5a6d85;">Country</td><td style="padding:4px 0;">{html.escape(safe_str(row.get("country") or "Unknown"))}</td></tr>
                 <tr><td style="padding:4px 0; color:#5a6d85;">Orbit</td><td style="padding:4px 0;">{html.escape(safe_str(row.get("orbit_regime") or "Unknown"))}</td></tr>
                 <tr><td style="padding:4px 0; color:#5a6d85;">Altitude</td><td style="padding:4px 0;">{float(row.get("altitude_km")):,.0f} km</td></tr>
                 <tr><td style="padding:4px 0; color:#5a6d85;">Velocity</td><td style="padding:4px 0;">{float(row.get("speed_kms")):.2f} km/s</td></tr>
-                <tr><td style="padding:4px 0; color:#5a6d85;">Note</td><td style="padding:4px 0;">{html.escape(CATEGORY_NOTES.get(row.get("category"), "Tracked public orbital object."))}</td></tr>
+                <tr><td style="padding:4px 0; color:#5a6d85;">Epoch</td><td style="padding:4px 0;">{html.escape(format_time(row.get("epoch")))}</td></tr>
             </table>
         </div>
     """
@@ -576,31 +482,35 @@ def satellite_icon_html(row, show_label):
     """
 
 
-def create_map(df, map_theme, show_tracks, show_labels, focus_region):
+def create_map(df, map_theme, show_labels):
     coords = df.dropna(subset=["latitude", "longitude"]).copy()
     if coords.empty:
         return None, False
-    center = REGION_SCOPES[focus_region]["center"]
-    satellite_map = folium.Map(
-        location=[center["lat"], center["lon"]],
-        zoom_start=center["zoom"],
-        control_scale=True,
-        prefer_canvas=True,
-        tiles=None,
-    )
+
+    satellite_map = folium.Map(location=[16, 0], zoom_start=2, control_scale=True, prefer_canvas=True, tiles=None)
+
     for theme_name, theme_config in MAP_THEMES.items():
-        folium.TileLayer(tiles=theme_config["tiles"], attr=theme_config["attr"], name=theme_name, show=theme_name == map_theme).add_to(satellite_map)
+        folium.TileLayer(
+            tiles=theme_config["tiles"],
+            attr=theme_config["attr"],
+            name=theme_name,
+            show=theme_name == map_theme,
+        ).add_to(satellite_map)
+
     Fullscreen(position="topright").add_to(satellite_map)
     MousePosition(position="bottomright", separator=" | ", lng_first=False, num_digits=3, prefix="Lat / Lon").add_to(satellite_map)
-    track_layer = folium.FeatureGroup(name="Ground tracks", show=show_tracks)
+
     marker_layer = folium.FeatureGroup(name="Satellites", show=True)
-    effective_labels = show_labels and len(coords) <= 140
+    effective_labels = show_labels and len(coords) <= 80
+
     for _, row in coords.iterrows():
-        if show_tracks:
-            for segment in row.get("track_segments") or []:
-                folium.PolyLine(locations=segment, color=row["marker_color"], weight=2, opacity=0.78, dash_array="7 8").add_to(track_layer)
-        folium.Marker(location=[row["latitude"], row["longitude"]], tooltip=f"{safe_str(row.get('name'))} | {safe_str(row.get('category'))}", popup=folium.Popup(popup_html(row), max_width=360), icon=DivIcon(html=satellite_icon_html(row, effective_labels))).add_to(marker_layer)
-    track_layer.add_to(satellite_map)
+        folium.Marker(
+            location=[row["latitude"], row["longitude"]],
+            tooltip=f"{safe_str(row.get('name'))} | {safe_str(row.get('category'))}",
+            popup=folium.Popup(popup_html(row), max_width=360),
+            icon=DivIcon(html=satellite_icon_html(row, effective_labels)),
+        ).add_to(marker_layer)
+
     marker_layer.add_to(satellite_map)
     folium.LayerControl(collapsed=True).add_to(satellite_map)
     return satellite_map, effective_labels
@@ -609,176 +519,159 @@ def create_map(df, map_theme, show_tracks, show_labels, focus_region):
 def priority_table(df):
     if df.empty:
         return df
-    table = df[["name", "category", "feed", "norad_id", "orbit_regime", "altitude_km", "speed_kms"]].copy()
+    table = df[["name", "category", "object_type", "country", "norad_id", "orbit_regime", "altitude_km", "speed_kms"]].copy()
     table["altitude_km"] = table["altitude_km"].round(0)
     table["speed_kms"] = table["speed_kms"].round(2)
-    return table.rename(columns={"name": "Satellite", "category": "Category", "feed": "Feed", "norad_id": "NORAD", "orbit_regime": "Orbit", "altitude_km": "Altitude (km)", "speed_kms": "Velocity (km/s)"})
+    return table.rename(
+        columns={
+            "name": "Satellite",
+            "category": "Category",
+            "object_type": "Type",
+            "country": "Country",
+            "norad_id": "NORAD",
+            "orbit_regime": "Orbit",
+            "altitude_km": "Altitude (km)",
+            "speed_kms": "Velocity (km/s)",
+        }
+    )
 
 
 def summary_table(df):
     if df.empty:
         return df
-    summary = df.groupby("category", dropna=False).agg(Objects=("name", "size"), Mean_Altitude_km=("altitude_km", "mean"), Mean_Velocity_kms=("speed_kms", "mean"), Example_Object=("name", "first")).reset_index()
+    summary = (
+        df.groupby("category", dropna=False)
+        .agg(
+            Objects=("name", "size"),
+            Mean_Altitude_km=("altitude_km", "mean"),
+            Mean_Velocity_kms=("speed_kms", "mean"),
+            Example_Object=("name", "first"),
+        )
+        .reset_index()
+    )
     summary["Mean_Altitude_km"] = summary["Mean_Altitude_km"].round(0)
     summary["Mean_Velocity_kms"] = summary["Mean_Velocity_kms"].round(2)
-    return summary.rename(columns={"category": "Category", "Mean_Altitude_km": "Mean Altitude (km)", "Mean_Velocity_kms": "Mean Velocity (km/s)", "Example_Object": "Example Object"})
+    return summary.rename(
+        columns={
+            "category": "Category",
+            "Mean_Altitude_km": "Mean Altitude (km)",
+            "Mean_Velocity_kms": "Mean Velocity (km/s)",
+            "Example_Object": "Example Object",
+        }
+    )
 
 
 def feed_table(df):
     if df.empty:
         return df
-    table = df[["name", "norad_id", "category", "feed", "orbit_regime", "altitude_km", "speed_kms", "latitude", "longitude"]].copy()
+    table = df[
+        ["name", "norad_id", "category", "object_type", "country", "orbit_regime", "altitude_km", "speed_kms", "latitude", "longitude", "launch_date"]
+    ].copy()
     table["altitude_km"] = table["altitude_km"].round(0)
     table["speed_kms"] = table["speed_kms"].round(2)
     table["latitude"] = table["latitude"].round(2)
     table["longitude"] = table["longitude"].round(2)
-    return table.rename(columns={"name": "Satellite", "norad_id": "NORAD", "category": "Category", "feed": "Feed", "orbit_regime": "Orbit", "altitude_km": "Altitude (km)", "speed_kms": "Velocity (km/s)", "latitude": "Latitude", "longitude": "Longitude"})
+    return table.rename(
+        columns={
+            "name": "Satellite",
+            "norad_id": "NORAD",
+            "category": "Category",
+            "object_type": "Type",
+            "country": "Country",
+            "orbit_regime": "Orbit",
+            "altitude_km": "Altitude (km)",
+            "speed_kms": "Velocity (km/s)",
+            "latitude": "Latitude",
+            "longitude": "Longitude",
+            "launch_date": "Launch Date",
+        }
+    )
+
 
 inject_styles()
-init_session_state()
 
 st.markdown(
     """
     <div class="hero-card">
-        <div class="hero-kicker">LIVE ORBITAL TRACKING</div>
-        <h1 class="hero-title">Satellite Radar</h1>
+        <div class="hero-kicker">SPACE-TRACK ORBITAL WATCH</div>
+        <h1 class="hero-title">Space Radar</h1>
         <p class="hero-copy">
-            A professional orbital watchboard for public satellite tracking, showing live ground positions,
-            orbital categories, and short projected tracks from open orbital catalogues.
+            A real-data orbital watchboard using Space-Track GP elements, propagated into current satellite positions.
         </p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-focus_region = st.session_state["satellite_focus_region"]
+identity = st.secrets.get("SPACE_TRACK_IDENTITY")
+password = st.secrets.get("SPACE_TRACK_PASSWORD")
 
-st.markdown(
-    """
-    <div class="panel-card">
-        <div class="panel-title">Regional Focus</div>
-        <div class="panel-copy">
-            Pick the part of the world you want to watch. The radar map and the visible satellite list
-            will focus on the selected region so the page is easier to read.
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-region_rows = [
-    ["Global", "Europe", "Asia", "North America"],
-    ["South America", "Africa", "Oceania"],
-]
-
-for region_row in region_rows:
-    columns = st.columns(len(region_row), gap="large")
-    for column, region_name in zip(columns, region_row):
-        with column:
-            render_region_card(region_name, focus_region)
-            button_label = f"Focus {region_name}" if focus_region != region_name else f"Focused: {region_name}"
-            if st.button(button_label, key=f"focus_region_{region_name}", use_container_width=True):
-                st.session_state["satellite_focus_region"] = region_name
-                st.rerun()
-
-st.markdown("")
+if not identity or not password:
+    st.error("Missing Space-Track credentials in Streamlit secrets.")
+    st.code(
+        '[SPACE_TRACK_IDENTITY and SPACE_TRACK_PASSWORD must be set in ".streamlit/secrets.toml"]'
+    )
+    st.stop()
 
 with st.sidebar:
-    st.markdown("### Radar Source")
-    radar_mode = st.selectbox(
-        "Load mode",
-        options=["Quick snapshot", "Full live radar"],
-        index=0,
-        help="Quick snapshot is much faster. Full live radar tries the larger public group feeds.",
+    st.markdown("### Radar Filters")
+    category_options = list(CATEGORY_COLORS.keys())
+    selected_categories = st.multiselect(
+        "Track categories",
+        options=category_options,
+        default=["Stations", "Navigation", "Weather", "Military"],
     )
-    categories = st.multiselect("Track categories", options=list(SATELLITE_GROUPS.keys()), default=["Stations", "Navigation", "Weather", "Military"])
-    per_category_limit = st.slider("Objects per category", min_value=4, max_value=24, value=10)
-    track_window = st.slider("Track window (minutes)", min_value=15, max_value=60, value=30, step=5)
-    track_step = st.slider("Track step (minutes)", min_value=5, max_value=20, value=10, step=5)
-    load_clicked = st.button("Load radar", type="primary", use_container_width=True)
-    st.caption("Click `Load radar` after changing mode, categories, or track settings.")
-
-    st.markdown("### Display Filters")
-    search_query = st.text_input("Search satellites", placeholder="Satellite, NORAD, category, or feed").strip()
+    limit_per_category = st.slider("Objects per category", min_value=5, max_value=80, value=20)
+    search_query = st.text_input("Search satellites", placeholder="Satellite, NORAD, country, or type").strip()
     regimes = st.multiselect("Orbit regimes", options=["LEO", "MEO", "GEO", "HEO"], default=["LEO", "MEO", "GEO", "HEO"])
+
     st.markdown("### Map Layers")
     map_theme = st.selectbox("Map theme", options=list(MAP_THEMES.keys()), index=1)
-    show_tracks = st.toggle("Show orbital tracks", value=True)
     show_labels = st.toggle("Show satellite labels", value=False)
 
-if not categories:
-    st.warning("Choose at least one satellite category to build the radar view.")
+if not selected_categories:
+    st.warning("Choose at least one category to build the radar view.")
     st.stop()
 
-if load_clicked:
-    with st.spinner("Loading public satellite tracks..."):
-        satellites_df, loaded_at_iso, loaded_feeds, data_source, data_error = load_radar_data(
-            radar_mode,
-            categories,
-            per_category_limit,
-            track_window,
-            track_step,
-        )
-        st.session_state["satellite_df"] = satellites_df
-        st.session_state["satellite_loaded_at_iso"] = loaded_at_iso
-        st.session_state["satellite_loaded_feeds"] = loaded_feeds
-        st.session_state["satellite_data_source"] = data_source
-        st.session_state["satellite_data_error"] = data_error
-        st.session_state["satellite_loaded_mode"] = radar_mode
-        st.session_state["satellite_loaded_categories"] = list(categories)
-        st.session_state["satellite_loaded_limit"] = per_category_limit
-        st.session_state["satellite_loaded_track_window"] = track_window
-        st.session_state["satellite_loaded_track_step"] = track_step
-    st.rerun()
-
-satellites_df = st.session_state["satellite_df"].copy()
-loaded_at_iso = st.session_state["satellite_loaded_at_iso"]
-loaded_feeds = st.session_state["satellite_loaded_feeds"]
-data_source = st.session_state["satellite_data_source"]
-data_error = st.session_state["satellite_data_error"]
-loaded_mode = st.session_state["satellite_loaded_mode"]
-loaded_categories = st.session_state["satellite_loaded_categories"]
-loaded_limit = st.session_state["satellite_loaded_limit"]
-loaded_track_window = st.session_state["satellite_loaded_track_window"]
-loaded_track_step = st.session_state["satellite_loaded_track_step"]
-focus_region = st.session_state["satellite_focus_region"]
-
-if satellites_df.empty:
-    st.markdown(
-        """
-        <div class="panel-card">
-            <div class="panel-title">Radar Ready</div>
-            <div class="panel-copy">
-                Pick a region above, then choose a satellite load mode in the sidebar and click <b>Load radar</b>.
-                Quick snapshot is the fastest option and is recommended when the larger public feeds are slow.
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+with st.spinner("Loading Space-Track orbital data..."):
+    satellites_df, loaded_at_iso, data_source, data_error = load_dataset(
+        identity,
+        password,
+        selected_categories,
+        limit_per_category,
     )
-    st.stop()
 
-regional_df = region_filter(satellites_df, focus_region)
-filtered_df = apply_filters(regional_df, search_query, regimes)
+filtered_df = apply_filters(satellites_df, search_query, regimes)
 priority_df = filtered_df.sort_values(["priority_rank", "altitude_km", "name"]).head(20).copy() if not filtered_df.empty else pd.DataFrame()
 military_df = filtered_df[filtered_df["category"] == "Military"].copy() if not filtered_df.empty else pd.DataFrame()
+navigation_df = filtered_df[filtered_df["category"] == "Navigation"].copy() if not filtered_df.empty else pd.DataFrame()
+
+status_label = {
+    "live": "Live",
+    "cached_live": "Cached Live",
+    "unavailable": "Unavailable",
+}.get(data_source, "Unknown")
+
+status_detail = format_time(loaded_at_iso) if loaded_at_iso else "No live orbital data available"
+status_color = {
+    "live": "#39d98a",
+    "cached_live": "#f59e0b",
+    "unavailable": "#ff5f6d",
+}.get(data_source, "#7dd3fc")
 
 metric_columns = st.columns(5)
 with metric_columns[0]:
-    render_metric_card("Focus region", focus_region, REGION_SCOPES[focus_region]["summary"], "#38bdf8")
+    render_metric_card("Objects loaded", f"{len(satellites_df):,}", "Loaded from Space-Track GP records", "#38bdf8")
 with metric_columns[1]:
-    render_metric_card("Objects in scope", f"{len(regional_df):,}", "Satellites currently over the selected region", "#7dd3fc")
+    render_metric_card("Objects in view", f"{len(filtered_df):,}", "Visible after search and orbit filters", "#7dd3fc")
 with metric_columns[2]:
-    render_metric_card("Objects in view", f"{len(filtered_df):,}", "Region, search, and orbit filtered set", "#58a6ff")
+    render_metric_card("Military watch", f"{len(military_df):,}", "Heuristic military-tagged objects in view", "#ff5f6d")
 with metric_columns[3]:
-    render_metric_card("Military watch", f"{len(military_df):,}", "Public military catalogue objects in view", "#ff5f6d")
+    render_metric_card("Navigation watch", f"{len(navigation_df):,}", "Navigation constellation objects in view", "#58a6ff")
 with metric_columns[4]:
-    if data_source == "live":
-        render_metric_card("Feed status", "Live", format_time(loaded_at_iso), "#39d98a")
-    elif data_source == "snapshot":
-        render_metric_card("Feed status", "Snapshot", "Official public watchlist fallback is in use", "#ffb454")
-    else:
-        render_metric_card("Feed status", "Demo", "Fallback orbital dataset is in use", "#ff9e3d")
+    render_metric_card("Feed status", status_label, status_detail, status_color)
+
+st.caption(f"Debug — source: {data_source}, rows loaded: {len(satellites_df)}")
 
 st.markdown("")
 map_col, side_col = st.columns([3.1, 1.15], gap="large")
@@ -789,83 +682,71 @@ with map_col:
         <div class="panel-card">
             <div class="panel-title">Orbital Radar Map</div>
             <div class="panel-copy">
-                The radar map is centered on the selected region and shows satellites whose current subpoints
-                are inside that regional focus. Dashed tracks show a short forward and backward ground-track window.
+                The map plots current satellite subpoints computed from Space-Track GP data.
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
     if filtered_df.empty:
-        st.info("No satellites are currently visible over the selected region under the active filters.")
+        if satellites_df.empty:
+            st.error("No satellite positions could be computed from the current Space-Track response.")
+            if data_error:
+                st.code(str(data_error))
+        else:
+            st.info("No satellites match the current search and orbit filters.")
     else:
-        orbital_map, labels_used = create_map(filtered_df, map_theme, show_tracks, show_labels, focus_region)
+        orbital_map, labels_used = create_map(filtered_df, map_theme, show_labels)
         if orbital_map is None:
             st.info("No satellite positions are available for the current view.")
         else:
             st_folium(orbital_map, use_container_width=True, height=720)
             if show_labels and not labels_used:
-                st.caption("Satellite labels were automatically reduced because too many objects are visible for clean labelling.")
+                st.caption("Satellite labels were reduced automatically because too many objects are visible.")
 
 with side_col:
-    feed_text = ", ".join(feed.replace("-", " ").title() for feed in loaded_feeds[:6])
-    if len(loaded_feeds) > 6:
-        feed_text += ", ..."
     st.markdown("#### Orbital brief")
     st.markdown(
         f"""
         <div class="panel-card">
             <div class="panel-title">Current radar scope</div>
             <div class="panel-copy">
-                {'Live public orbital feed' if data_source == 'live' else 'Official public snapshot fallback' if data_source == 'snapshot' else 'Demo orbital fallback'}<br>
-                Loaded at: {html.escape(format_time(loaded_at_iso))}<br>
-                Loaded mode: {html.escape(safe_str(loaded_mode or 'Unknown'))}<br>
-                Focus region: {html.escape(focus_region)}<br>
-                Categories: {html.escape(", ".join(loaded_categories) if loaded_categories else 'Unknown')}<br>
-                Public feeds: {html.escape(feed_text)}<br>
-                Track profile: {html.escape(f"{loaded_track_window} min / {loaded_track_step} min step" if loaded_track_window and loaded_track_step else "Unknown")}
+                {html.escape(status_label)}<br>
+                Loaded at: {html.escape(status_detail)}<br>
+                Categories: {html.escape(", ".join(selected_categories))}<br>
+                Source: Space-Track GP JSON
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
     st.markdown("#### Signal logic")
     st.markdown(
         """
         <div class="panel-card">
             <div class="panel-title">How to read this radar</div>
             <div class="panel-copy">
-                Positions are derived from public TLE data. The regional focus clips the radar to satellites
-                whose current subpoints are over that part of the world. LEO tracks move fastest across the map,
-                while GEO satellites stay close to fixed longitudes.
+                Positions are propagated from current GP orbital elements. Category labels are heuristic groupings based on satellite names and public metadata.
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    if data_error:
-        if data_source == "snapshot":
-            st.warning(f"Live orbital feed was unavailable, so the radar switched to an official public snapshot fallback: {data_error}")
-        elif data_source == "demo":
-            st.warning(f"Live orbital feed and official snapshot fallback were unavailable, so demo radar data is in use: {data_error}")
 
-    if (
-        loaded_mode is not None
-        and (
-            list(categories) != list(loaded_categories)
-            or per_category_limit != loaded_limit
-            or track_window != loaded_track_window
-            or track_step != loaded_track_step
-            or radar_mode != loaded_mode
-        )
-    ):
-        st.info("Radar source settings changed. Click `Load radar` in the sidebar to refresh the orbital dataset.")
+    if data_source == "cached_live" and data_error:
+        st.warning("Live login or query failed. Showing the most recent cached real dataset instead.")
+        st.code(str(data_error))
+    elif data_source == "unavailable" and data_error:
+        st.error("No live Space-Track data could be loaded, and no cached real dataset exists yet.")
+        st.code(str(data_error))
 
 tab_priority, tab_summary, tab_feed = st.tabs(["Priority Watch", "Category Summary", "Tracked Objects"])
 
 with tab_priority:
     st.markdown("### Priority Orbital Watch")
-    st.caption("This view prioritises crewed platforms, military watch objects, navigation satellites, and other high-interest public orbital assets.")
+    st.caption("This view prioritises crewed platforms, military watch objects, navigation satellites, and other high-interest public assets.")
     if priority_df.empty:
         st.info("No satellites are visible under the active filters.")
     else:
@@ -873,7 +754,7 @@ with tab_priority:
 
 with tab_summary:
     st.markdown("### Category Summary")
-    st.caption("A quick breakdown of how the current orbital picture is distributed across the selected public categories.")
+    st.caption("A quick breakdown of how the current orbital picture is distributed across the selected categories.")
     if filtered_df.empty:
         st.info("No category summary is available for the current filters.")
     else:
@@ -889,7 +770,7 @@ with tab_feed:
 
 st.markdown("---")
 st.caption(
-    f"Loaded {len(satellites_df):,} satellite records from the "
-    f"{'live public orbital feed' if data_source == 'live' else 'official public snapshot fallback' if data_source == 'snapshot' else 'demo fallback'}, with "
-    f"{len(filtered_df):,} objects visible after filtering and {len(priority_df):,} entries highlighted in the priority watch."
+    f"Loaded {len(satellites_df):,} propagated satellite records from {status_label.lower()}, "
+    f"with {len(filtered_df):,} objects visible after filtering and "
+    f"{len(priority_df):,} entries highlighted in the priority watch."
 )
