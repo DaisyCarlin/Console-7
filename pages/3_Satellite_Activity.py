@@ -1,3 +1,9 @@
+import html
+import math
+from datetime import datetime, timezone
+from pathlib import Path
+
+import folium
 import pandas as pd
 import requests
 import streamlit as st
@@ -8,7 +14,6 @@ from sgp4 import omm
 from sgp4.api import Satrec, jday
 from streamlit_folium import st_folium
 from urllib3.util.retry import Retry
-from pathlib import Path
 
 st.set_page_config(page_title="Space Radar", layout="wide")
 
@@ -22,7 +27,7 @@ SPACE_TRACK_GP_URL = (
     "format/json"
 )
 
-REQUEST_TIMEOUT_SECONDS = 20
+REQUEST_TIMEOUT_SECONDS = 12
 QUERY_CACHE_TTL_SECONDS = 3600
 DISK_CACHE_FILE = "spacetrack_gp_cache.pkl"
 
@@ -189,6 +194,8 @@ def format_time(value):
 
 
 def orbit_regime(altitude_km):
+    if pd.isna(altitude_km):
+        return "Unknown"
     if altitude_km < 2000:
         return "LEO"
     if altitude_km < 30000:
@@ -222,15 +229,15 @@ def classify_satellite(name):
 def build_session():
     session = requests.Session()
     retry = Retry(
-        total=2,
-        connect=2,
-        read=2,
-        backoff_factor=0.8,
+        total=1,
+        connect=1,
+        read=1,
+        backoff_factor=0.5,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET", "POST"],
         raise_on_status=False,
     )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=8, pool_maxsize=8)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=6, pool_maxsize=6)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     session.headers.update({"User-Agent": "Console7-SpaceRadar/1.0"})
@@ -400,6 +407,10 @@ def build_dataset(identity, password, selected_categories, limit_per_category):
         raise RuntimeError("No propagatable satellite positions were produced for the current category selection.")
 
     df = pd.DataFrame(rows)
+
+    if "altitude_km" in df.columns and "orbit_regime" not in df.columns:
+        df["orbit_regime"] = df["altitude_km"].apply(orbit_regime)
+
     df["marker_color"] = df["category"].map(CATEGORY_COLORS).fillna("#94a3b8")
     df["priority_rank"] = df["category"].map(PRIORITY_RANKS).fillna(99)
     df["search_blob"] = df.apply(search_blob, axis=1)
@@ -432,10 +443,13 @@ def load_dataset(identity, password, selected_categories, limit_per_category):
 
 def apply_filters(df, search_query, regimes):
     filtered = df.copy()
-    if search_query:
+
+    if search_query and "search_blob" in filtered.columns:
         filtered = filtered[filtered["search_blob"].str.contains(search_query.lower(), na=False)]
-    if regimes:
+
+    if regimes and "orbit_regime" in filtered.columns:
         filtered = filtered[filtered["orbit_regime"].isin(regimes)]
+
     return filtered.reset_index(drop=True)
 
 
@@ -466,9 +480,11 @@ def popup_html(row):
 def satellite_icon_html(row, show_label):
     color = row.get("marker_color", "#7dd3fc")
     label_html = ""
+
     if show_label:
         label = html.escape((safe_str(row.get("name")) or "Satellite")[:16])
         label_html = f'<div style="margin-top:3px; padding:2px 7px; border-radius:999px; background:rgba(7,17,31,.9); color:#f4f9ff; font-size:10px; font-weight:700; text-align:center; white-space:nowrap;">{label}</div>'
+
     return f"""
         <div style="position:relative; width:38px; height:38px; transform:translate(-19px,-19px);">
             <div style="width:38px; height:38px; border-radius:999px; background:rgba(8,18,30,.84); box-shadow:0 0 0 1px rgba(255,255,255,.14), 0 12px 26px {color}55; display:flex; align-items:center; justify-content:center;">
@@ -502,7 +518,7 @@ def create_map(df, map_theme, show_labels):
     MousePosition(position="bottomright", separator=" | ", lng_first=False, num_digits=3, prefix="Lat / Lon").add_to(satellite_map)
 
     marker_layer = folium.FeatureGroup(name="Satellites", show=True)
-    effective_labels = show_labels and len(coords) <= 80
+    effective_labels = show_labels and len(coords) <= 60
 
     for _, row in coords.iterrows():
         folium.Marker(
@@ -610,7 +626,7 @@ password = st.secrets.get("SPACE_TRACK_PASSWORD")
 if not identity or not password:
     st.error("Missing Space-Track credentials in Streamlit secrets.")
     st.code(
-        '[SPACE_TRACK_IDENTITY and SPACE_TRACK_PASSWORD must be set in ".streamlit/secrets.toml"]'
+        'Create ".streamlit/secrets.toml" with:\n\nSPACE_TRACK_IDENTITY = "your_email"\nSPACE_TRACK_PASSWORD = "your_password"'
     )
     st.stop()
 
@@ -622,9 +638,13 @@ with st.sidebar:
         options=category_options,
         default=["Stations", "Navigation", "Weather", "Military"],
     )
-    limit_per_category = st.slider("Objects per category", min_value=5, max_value=80, value=20)
+    limit_per_category = st.slider("Objects per category", min_value=2, max_value=20, value=5)
     search_query = st.text_input("Search satellites", placeholder="Satellite, NORAD, country, or type").strip()
-    regimes = st.multiselect("Orbit regimes", options=["LEO", "MEO", "GEO", "HEO"], default=["LEO", "MEO", "GEO", "HEO"])
+    regimes = st.multiselect(
+        "Orbit regimes",
+        options=["LEO", "MEO", "GEO", "HEO"],
+        default=["LEO", "MEO", "GEO", "HEO"],
+    )
 
     st.markdown("### Map Layers")
     map_theme = st.selectbox("Map theme", options=list(MAP_THEMES.keys()), index=1)
@@ -643,9 +663,14 @@ with st.spinner("Loading Space-Track orbital data..."):
     )
 
 filtered_df = apply_filters(satellites_df, search_query, regimes)
-priority_df = filtered_df.sort_values(["priority_rank", "altitude_km", "name"]).head(20).copy() if not filtered_df.empty else pd.DataFrame()
-military_df = filtered_df[filtered_df["category"] == "Military"].copy() if not filtered_df.empty else pd.DataFrame()
-navigation_df = filtered_df[filtered_df["category"] == "Navigation"].copy() if not filtered_df.empty else pd.DataFrame()
+
+priority_df = (
+    filtered_df.sort_values(["priority_rank", "altitude_km", "name"]).head(20).copy()
+    if not filtered_df.empty and "priority_rank" in filtered_df.columns
+    else pd.DataFrame()
+)
+military_df = filtered_df[filtered_df["category"] == "Military"].copy() if not filtered_df.empty and "category" in filtered_df.columns else pd.DataFrame()
+navigation_df = filtered_df[filtered_df["category"] == "Navigation"].copy() if not filtered_df.empty and "category" in filtered_df.columns else pd.DataFrame()
 
 status_label = {
     "live": "Live",
