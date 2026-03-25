@@ -5,8 +5,23 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+rom __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from utils.event_logger import EVENT_COLUMNS, EVENTS_CSV_PATH
+
+st.set_page_config(page_title="Strategic Insights", layout="wide")
+
 st.write("CSV PATH:", EVENTS_CSV_PATH)
 st.write("FILE EXISTS:", os.path.exists(EVENTS_CSV_PATH))
 
