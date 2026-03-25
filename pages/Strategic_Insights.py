@@ -175,12 +175,6 @@ def month_windows(now_utc: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp, pd
     return previous_month_start, current_month_start, next_month_start
 
 
-def safe_pct_change(current_count: int, previous_count: int) -> float:
-    if previous_count == 0:
-        return 100.0 if current_count > 0 else 0.0
-    return ((current_count - previous_count) / previous_count) * 100.0
-
-
 def top_value_by_country(events_df: pd.DataFrame, value_col: str) -> pd.Series:
     if events_df.empty or value_col not in events_df.columns:
         return pd.Series(dtype="object")
@@ -193,14 +187,6 @@ def top_value_by_country(events_df: pd.DataFrame, value_col: str) -> pd.Series:
     )
 
     return grouped.drop_duplicates(subset=["country"]).set_index("country")[value_col]
-
-
-def significance_level(current_count: int, pct_change: float) -> str:
-    if current_count >= 20 and abs(pct_change) >= 25:
-        return "High"
-    if current_count >= 10 and abs(pct_change) >= 10:
-        return "Medium"
-    return "Low"
 
 
 def calculate_country_summary(events_df: pd.DataFrame, now_utc: pd.Timestamp) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -223,10 +209,17 @@ def calculate_country_summary(events_df: pd.DataFrame, now_utc: pd.Timestamp) ->
     summary_df["current_count"] = summary_df["country"].map(current_counts).fillna(0).astype(int)
     summary_df["previous_count"] = summary_df["country"].map(previous_counts).fillna(0).astype(int)
     summary_df["absolute_change"] = summary_df["current_count"] - summary_df["previous_count"]
-    summary_df["pct_change"] = summary_df.apply(
-        lambda row: safe_pct_change(int(row["current_count"]), int(row["previous_count"])),
-        axis=1,
-    )
+
+    summary_df["pct_change"] = 0.0
+    has_previous = summary_df["previous_count"] > 0
+    summary_df.loc[has_previous, "pct_change"] = (
+        (summary_df.loc[has_previous, "current_count"] - summary_df.loc[has_previous, "previous_count"])
+        / summary_df.loc[has_previous, "previous_count"]
+    ) * 100.0
+    summary_df.loc[
+        (~has_previous) & (summary_df["current_count"] > 0),
+        "pct_change"
+    ] = 100.0
 
     sensitive_counts = (
         current_df[current_df["sensitive"] == True]
@@ -235,10 +228,12 @@ def calculate_country_summary(events_df: pd.DataFrame, now_utc: pd.Timestamp) ->
         .rename("sensitive_count")
     )
     summary_df["sensitive_count"] = summary_df["country"].map(sensitive_counts).fillna(0).astype(int)
-    summary_df["sensitive_share"] = summary_df.apply(
-        lambda row: (row["sensitive_count"] / row["current_count"] * 100) if row["current_count"] > 0 else 0,
-        axis=1,
-    )
+
+    summary_df["sensitive_share"] = 0.0
+    has_current = summary_df["current_count"] > 0
+    summary_df.loc[has_current, "sensitive_share"] = (
+        summary_df.loc[has_current, "sensitive_count"] / summary_df.loc[has_current, "current_count"]
+    ) * 100.0
 
     current_top_event_types = top_value_by_country(current_df, "event_type")
     previous_top_event_types = top_value_by_country(previous_df, "event_type")
@@ -258,10 +253,15 @@ def calculate_country_summary(events_df: pd.DataFrame, now_utc: pd.Timestamp) ->
     summary_df["top_source"] = summary_df["top_source"].fillna(summary_df["country"].map(previous_top_sources))
     summary_df["top_source"] = summary_df["top_source"].fillna("Unknown")
 
-    summary_df["significance"] = summary_df.apply(
-        lambda row: significance_level(int(row["current_count"]), float(row["pct_change"])),
-        axis=1,
-    )
+    summary_df["significance"] = "Low"
+    summary_df.loc[
+        (summary_df["current_count"] >= 10) & (summary_df["pct_change"].abs() >= 10),
+        "significance"
+    ] = "Medium"
+    summary_df.loc[
+        (summary_df["current_count"] >= 20) & (summary_df["pct_change"].abs() >= 25),
+        "significance"
+    ] = "High"
 
     summary_df = summary_df.sort_values(
         ["current_count", "absolute_change", "country"],
