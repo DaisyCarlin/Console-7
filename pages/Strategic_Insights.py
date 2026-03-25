@@ -1,22 +1,42 @@
 from __future__ import annotations
 
-import os
-import sys
-from pathlib import Path
-
+import time
 import pandas as pd
+import requests
 import streamlit as st
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.append(str(PROJECT_ROOT))
-
-from utils.event_logger import EVENT_COLUMNS, EVENTS_CSV_PATH
 
 st.set_page_config(page_title="Strategic Insights", layout="wide")
 
-st.write("CSV PATH:", EVENTS_CSV_PATH)
-st.write("FILE EXISTS:", os.path.exists(EVENTS_CSV_PATH))
+RECENT_LIMIT = 60
+REQUEST_TIMEOUT = 45
+REQUEST_RETRIES = 3
+CACHE_TTL_SECONDS = 300
+
+SENSITIVE_KEYWORDS = [
+    "government",
+    "national security",
+    "military",
+    "reconnaissance",
+    "surveillance",
+    "classified",
+    "nrol",
+    "nro",
+    "ussf-",
+    "gps",
+    "wgs",
+    "gssap",
+    "missile warning",
+    "missile tracking",
+    "tracking layer",
+    "satcom",
+]
+
+WATCHED_PROVIDERS = [
+    "united launch alliance",
+    "spacex",
+    "rocket lab",
+    "northrop grumman",
+]
 
 
 def inject_styles() -> None:
@@ -116,49 +136,94 @@ def inject_styles() -> None:
     )
 
 
-def empty_events_frame() -> pd.DataFrame:
-    return pd.DataFrame(columns=EVENT_COLUMNS)
+def safe_text(value):
+    return "" if value is None else str(value).strip()
 
 
-def coerce_sensitive(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    if pd.isna(value):
-        return False
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return str(value).strip().lower() in {"1", "true", "yes", "y", "t"}
+def fetch_json_with_retry(url: str, timeout: int = REQUEST_TIMEOUT, retries: int = REQUEST_RETRIES):
+    last_error = None
+    for attempt in range(retries):
+        try:
+            response = requests.get(url, timeout=timeout)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as error:
+            last_error = error
+            if attempt < retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+    raise last_error
 
 
-def load_events() -> pd.DataFrame:
-    if not EVENTS_CSV_PATH.exists() or EVENTS_CSV_PATH.stat().st_size == 0:
-        return empty_events_frame()
+def looks_sensitive(row: pd.Series) -> bool:
+    name = safe_text(row.get("name")).lower()
+    mission_type = safe_text(row.get("subcategory")).lower()
+    provider = safe_text(row.get("source")).lower()
+    text = " ".join([name, mission_type, provider])
 
-    try:
-        events_df = pd.read_csv(EVENTS_CSV_PATH, dtype=str)
-    except Exception as error:
-        st.error(f"Could not read events CSV: {error}")
-        return empty_events_frame()
+    if any(keyword in text for keyword in SENSITIVE_KEYWORDS):
+        return True
 
-    for column in EVENT_COLUMNS:
-        if column not in events_df.columns:
-            events_df[column] = ""
+    if any(provider_name in provider for provider_name in WATCHED_PROVIDERS):
+        watched_pattern = (
+            "government",
+            "military",
+            "national security",
+            "reconnaissance",
+            "surveillance",
+            "classified",
+            "nrol",
+            "nro",
+            "gps",
+            "wgs",
+            "gssap",
+            "missile",
+        )
+        return any(token in text for token in watched_pattern)
 
-    events_df = events_df[EVENT_COLUMNS].copy()
-    events_df["timestamp"] = pd.to_datetime(events_df["timestamp"], utc=True, errors="coerce")
-    events_df["country"] = events_df["country"].fillna("").astype(str).str.strip()
-    events_df["event_type"] = events_df["event_type"].fillna("").astype(str).str.strip()
-    events_df["subcategory"] = events_df["subcategory"].fillna("").astype(str).str.strip()
-    events_df["source"] = events_df["source"].fillna("").astype(str).str.strip()
-    events_df["event_id"] = events_df["event_id"].fillna("").astype(str).str.strip()
-    events_df["sensitive"] = events_df["sensitive"].apply(coerce_sensitive)
+    return False
 
-    events_df.loc[events_df["country"] == "", "country"] = "Unknown"
-    events_df.loc[events_df["event_type"] == "", "event_type"] = "Unknown"
-    events_df.loc[events_df["subcategory"] == "", "subcategory"] = "Unknown"
-    events_df.loc[events_df["source"] == "", "source"] = "Unknown"
 
-    return events_df
+def build_launch_events(raw_results) -> pd.DataFrame:
+    rows = []
+
+    for item in raw_results:
+        mission = item.get("mission") or {}
+        rocket = item.get("rocket") or {}
+        configuration = rocket.get("configuration") or {}
+        provider = item.get("launch_service_provider") or {}
+        pad = item.get("pad") or {}
+        location = pad.get("location") or {}
+
+        row = {
+            "event_id": f"launch_{safe_text(item.get('id') or item.get('name'))}_{safe_text(item.get('net'))}",
+            "timestamp": item.get("net"),
+            "country": safe_text(location.get("country_code")) or "Unknown",
+            "event_type": "launch",
+            "subcategory": safe_text(mission.get("type")) or "orbital_launch",
+            "source": safe_text(provider.get("name")) or "Unknown",
+            "name": safe_text(item.get("name")) or "Unknown launch",
+            "rocket": safe_text(configuration.get("name")) or "Unknown",
+            "location_name": safe_text(location.get("name")) or "Unknown",
+        }
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    df["sensitive"] = df.apply(looks_sensitive, axis=1)
+    return df
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+def get_recent_launch_events() -> pd.DataFrame:
+    url = f"https://ll.thespacedevs.com/2.2.0/launch/previous/?limit={RECENT_LIMIT}&mode=detailed"
+    raw = fetch_json_with_retry(url)["results"]
+    df = build_launch_events(raw)
+    if not df.empty:
+        df = df.sort_values("timestamp", ascending=False)
+    return df
 
 
 def apply_filters(events_df: pd.DataFrame, selected_event_types: list[str], sensitive_only: bool) -> pd.DataFrame:
@@ -167,7 +232,7 @@ def apply_filters(events_df: pd.DataFrame, selected_event_types: list[str], sens
     if selected_event_types:
         filtered_df = filtered_df[filtered_df["event_type"].isin(selected_event_types)]
 
-    if sensitive_only:
+    if sensitive_only and "sensitive" in filtered_df.columns:
         filtered_df = filtered_df[filtered_df["sensitive"]]
 
     return filtered_df.reset_index(drop=True)
@@ -240,12 +305,6 @@ def calculate_country_summary(events_df: pd.DataFrame, now_utc: pd.Timestamp) ->
         summary_df.loc[has_current, "sensitive_count"] / summary_df.loc[has_current, "current_count"]
     ) * 100.0
 
-    current_top_event_types = top_value_by_country(current_df, "event_type")
-    previous_top_event_types = top_value_by_country(previous_df, "event_type")
-    summary_df["top_event_type"] = summary_df["country"].map(current_top_event_types)
-    summary_df["top_event_type"] = summary_df["top_event_type"].fillna(summary_df["country"].map(previous_top_event_types))
-    summary_df["top_event_type"] = summary_df["top_event_type"].fillna("No events")
-
     current_top_subcategories = top_value_by_country(current_df, "subcategory")
     previous_top_subcategories = top_value_by_country(previous_df, "subcategory")
     summary_df["top_subcategory"] = summary_df["country"].map(current_top_subcategories)
@@ -278,7 +337,7 @@ def calculate_country_summary(events_df: pd.DataFrame, now_utc: pd.Timestamp) ->
 
 def build_narrative_insights(summary_df: pd.DataFrame) -> list[str]:
     if summary_df.empty or int(summary_df["current_count"].sum()) == 0:
-        return ["No current-month events match the selected filters yet, so no country-level movement stands out."]
+        return ["No current-month launch events match the selected filters yet, so no country-level movement stands out."]
 
     insights: list[str] = []
     current_positive = summary_df[summary_df["current_count"] > 0].copy()
@@ -289,7 +348,7 @@ def build_narrative_insights(summary_df: pd.DataFrame) -> list[str]:
     ).iloc[0]
     insights.append(
         f"{most_active['country']} is the most active country this month with "
-        f"{int(most_active['current_count'])} logged events, mainly linked to "
+        f"{int(most_active['current_count'])} logged launch events, mainly linked to "
         f"{most_active['top_subcategory']} activity."
     )
 
@@ -303,19 +362,7 @@ def build_narrative_insights(summary_df: pd.DataFrame) -> list[str]:
             f"{biggest_increase['country']} shows the strongest month-on-month increase, up "
             f"{int(biggest_increase['absolute_change'])} events "
             f"({float(biggest_increase['pct_change']):+.1f}%), driven mainly by "
-            f"{biggest_increase['top_subcategory']} events."
-        )
-
-    biggest_decrease_df = summary_df[summary_df["absolute_change"] < 0].sort_values(
-        ["absolute_change", "pct_change", "country"],
-        ascending=[True, True, True],
-    )
-    if not biggest_decrease_df.empty:
-        biggest_decrease = biggest_decrease_df.iloc[0]
-        insights.append(
-            f"{biggest_decrease['country']} records the sharpest decline, down "
-            f"{abs(int(biggest_decrease['absolute_change']))} events "
-            f"({float(biggest_decrease['pct_change']):+.1f}%) compared with last month."
+            f"{biggest_increase['top_subcategory']} launches."
         )
 
     high_sensitive_df = current_positive[current_positive["sensitive_share"] >= 50].sort_values(
@@ -325,7 +372,7 @@ def build_narrative_insights(summary_df: pd.DataFrame) -> list[str]:
     if not high_sensitive_df.empty:
         sensitive_leader = high_sensitive_df.iloc[0]
         insights.append(
-            f"{sensitive_leader['country']} has the highest sensitive-event concentration this month, with "
+            f"{sensitive_leader['country']} has the highest sensitive-launch concentration this month, with "
             f"{sensitive_leader['sensitive_share']:.0f}% of its logged activity marked sensitive."
         )
 
@@ -336,24 +383,11 @@ def build_narrative_insights(summary_df: pd.DataFrame) -> list[str]:
     if not top_source_df.empty:
         source_leader = top_source_df.iloc[0]
         insights.append(
-            f"The dominant source feeding current activity for {source_leader['country']} is "
+            f"The dominant launch provider feeding current activity for {source_leader['country']} is "
             f"{source_leader['top_source']}."
         )
 
-    high_significance_count = int((summary_df["significance"] == "High").sum())
-    if high_significance_count > 0:
-        highlighted = ", ".join(summary_df[summary_df["significance"] == "High"]["country"].head(3).tolist())
-        insights.append(
-            f"{high_significance_count} countries currently rate as high significance, with {highlighted} standing out most clearly."
-        )
-    else:
-        medium_significance_count = int((summary_df["significance"] == "Medium").sum())
-        insights.append(
-            f"No countries currently meet the high-significance threshold. "
-            f"{medium_significance_count} countries sit in the medium-significance band."
-        )
-
-    return insights[:6]
+    return insights[:5]
 
 
 def format_summary_table(summary_df: pd.DataFrame) -> pd.DataFrame:
@@ -372,27 +406,12 @@ def format_summary_table(summary_df: pd.DataFrame) -> pd.DataFrame:
             "pct_change": "Percent Change",
             "sensitive_count": "Sensitive Count",
             "sensitive_share": "Sensitive Share",
-            "top_event_type": "Top Event Type",
             "top_subcategory": "Top Activity Type",
             "top_source": "Top Source",
             "significance": "Significance",
         }
     )
     return display_df
-
-
-def format_movers_table(summary_df: pd.DataFrame, limit: int = 10) -> pd.DataFrame:
-    if summary_df.empty:
-        return summary_df
-
-    movers_df = summary_df.copy()
-    movers_df["movement_size"] = movers_df["absolute_change"].abs()
-    movers_df = movers_df.sort_values(
-        ["movement_size", "absolute_change", "current_count", "country"],
-        ascending=[False, False, False, True],
-    ).head(limit)
-    movers_df = movers_df.drop(columns=["movement_size"])
-    return format_summary_table(movers_df)
 
 
 inject_styles()
@@ -403,20 +422,26 @@ st.markdown(
         <div class="hero-kicker">COUNTRY-LEVEL ANALYST VIEW</div>
         <h1 class="hero-title">Strategic Insights</h1>
         <p class="hero-copy">
-            Convert logged military flights, emergency flights, launches, and satellite activity into
-            month-on-month country movements, sensitive-activity concentration, source mix, and analyst-style insights.
+            Convert live launch activity into month-on-month country movements, sensitive-activity concentration,
+            provider mix, and analyst-style insights.
         </p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-events_df = load_events()
-st.write("ROWS LOADED:", len(events_df))
+try:
+    events_df = get_recent_launch_events()
+    data_error = None
+except Exception as error:
+    events_df = pd.DataFrame()
+    data_error = str(error)
+
+st.write("LIVE ROWS LOADED:", len(events_df))
 
 event_type_options = sorted(
-    [event_type for event_type in events_df["event_type"].dropna().unique().tolist() if str(event_type).strip()]
-)
+    [event_type for event_type in events_df["event_type"].dropna().unique().tolist()]
+) if not events_df.empty else []
 
 with st.sidebar:
     st.markdown("### Insight Filters")
@@ -424,22 +449,17 @@ with st.sidebar:
         "Event types",
         options=event_type_options,
         default=event_type_options,
-        help="Filter the intelligence view to one or more tracked event categories.",
     )
-    sensitive_only = st.toggle(
-        "Sensitive only",
-        value=False,
-        help="Only include events marked as sensitive in the logger.",
-    )
+    sensitive_only = st.toggle("Sensitive only", value=False)
+
+if data_error:
+    st.error(f"Could not load live launch data: {data_error}")
+    st.stop()
 
 now_utc = pd.Timestamp.now(tz="UTC")
 previous_month_start, current_month_start, next_month_start = month_windows(now_utc)
 
-if event_type_options and not selected_event_types:
-    filtered_events_df = events_df.iloc[0:0].copy()
-else:
-    filtered_events_df = apply_filters(events_df, selected_event_types, sensitive_only)
-
+filtered_events_df = apply_filters(events_df, selected_event_types, sensitive_only)
 summary_df, current_month_df, previous_month_df = calculate_country_summary(filtered_events_df, now_utc)
 insights = build_narrative_insights(summary_df)
 
@@ -448,9 +468,6 @@ st.caption(
     f"{next_month_start.strftime('%d %b %Y')} UTC | Previous month window: "
     f"{previous_month_start.strftime('%d %b %Y')} to {current_month_start.strftime('%d %b %Y')} UTC"
 )
-
-if events_df.empty:
-    st.info("No logged events are available yet. Start writing rows to data/events.csv through log_event() to populate this page.")
 
 metrics_col_1, metrics_col_2, metrics_col_3, metrics_col_4 = st.columns(4)
 
@@ -488,26 +505,25 @@ st.markdown(
     <div class="panel-card">
         <div class="panel-title">Analyst Insights</div>
         <div class="panel-copy">
-            Narrative takeaways generated directly from the month-on-month comparison, source mix, and sensitivity profile.
+            Narrative takeaways generated directly from the month-on-month comparison, provider mix, and sensitivity profile.
         </div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-if insights:
-    for insight in insights:
-        st.markdown(f"- {insight}")
+for insight in insights:
+    st.markdown(f"- {insight}")
 
-content_left, content_right = st.columns([1.65, 1], gap="large")
+left_col, right_col = st.columns([1.65, 1], gap="large")
 
-with content_left:
+with left_col:
     st.markdown(
         """
         <div class="panel-card">
             <div class="panel-title">Country Summary</div>
             <div class="panel-copy">
-                Country-level event totals, movement, sensitivity, dominant activity type, dominant source, and significance score.
+                Country-level launch totals, movement, sensitivity, dominant activity type, dominant source, and significance score.
             </div>
         </div>
         """,
@@ -519,13 +535,13 @@ with content_left:
     else:
         st.dataframe(format_summary_table(summary_df), use_container_width=True, hide_index=True)
 
-with content_right:
+with right_col:
     st.markdown(
         """
         <div class="panel-card">
             <div class="panel-title">Top Countries This Month</div>
             <div class="panel-copy">
-                Current-month event volume by country for the strongest visible activity concentrations.
+                Current-month launch volume by country.
             </div>
         </div>
         """,
@@ -544,7 +560,7 @@ st.markdown(
     <div class="panel-card">
         <div class="panel-title">Sensitive vs Non-Sensitive Activity</div>
         <div class="panel-copy">
-            Compare how much of each country's current-month activity is marked sensitive versus routine.
+            Compare how much of each country's current-month launch activity is marked sensitive versus routine.
         </div>
     </div>
     """,
@@ -564,7 +580,7 @@ st.markdown(
     <div class="panel-card">
         <div class="panel-title">Top Sources This Month</div>
         <div class="panel-copy">
-            Which feeds or providers are contributing the most logged current-month activity.
+            Which launch providers are contributing the most current-month activity.
         </div>
     </div>
     """,
@@ -583,20 +599,3 @@ else:
         .set_index("source")
     )
     st.bar_chart(source_chart_df)
-
-st.markdown(
-    """
-    <div class="panel-card">
-        <div class="panel-title">Movers</div>
-        <div class="panel-copy">
-            Countries with the largest absolute month-on-month movement under the current filters.
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-if summary_df.empty:
-    st.info("No movers are available because there are no country comparisons yet.")
-else:
-    st.dataframe(format_movers_table(summary_df), use_container_width=True, hide_index=True)
