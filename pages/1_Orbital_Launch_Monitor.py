@@ -8,6 +8,7 @@ import streamlit as st
 from folium.features import DivIcon
 from folium.plugins import Fullscreen, MousePosition
 from streamlit_folium import st_folium
+
 from utils.event_logger import log_event
 
 st.set_page_config(page_title="Orbital Launch Monitor", layout="wide")
@@ -490,6 +491,34 @@ def assess_sensitive_launch(row: pd.Series) -> dict:
     }
 
 
+def save_launch_event(launch):
+    mission_name = safe_text(launch.get("name")) or "unknown-launch"
+    launch_time = launch.get("net")
+    country = safe_text(launch.get("country_code")) or "Unknown"
+    subcategory = safe_text(launch.get("mission_type")) or "orbital_launch"
+    provider = safe_text(launch.get("provider")) or "Unknown"
+
+    if pd.isna(launch_time):
+        return
+
+    if hasattr(launch_time, "isoformat"):
+        launch_time = launch_time.isoformat()
+
+    event_id = f"launch_{mission_name}_{launch_time}"
+
+    log_event(
+        {
+            "event_id": event_id,
+            "timestamp": launch_time,
+            "country": country,
+            "event_type": "launch",
+            "subcategory": subcategory,
+            "source": provider,
+            "sensitive": looks_sensitive(launch),
+        }
+    )
+
+
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
 def get_upcoming_launches():
     url = f"https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit={UPCOMING_LIMIT}&mode=detailed"
@@ -691,8 +720,9 @@ st.markdown(
         <div class="hero-kicker">LIVE ORBITAL OPERATIONS</div>
         <h1 class="hero-title">Orbital Launch Monitor</h1>
         <p class="hero-copy">
-
-        
+            Monitor upcoming launches, recent failures, and publicly signaled sensitive missions from live launch feeds,
+            then automatically log real launch events into the Strategic Insights pipeline.
+        </p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -712,6 +742,7 @@ try:
 except Exception as error:
     recent_launches_df = pd.DataFrame()
     recent_launch_error = str(error)
+
 if not launches_df.empty:
     for _, launch_row in launches_df.iterrows():
         save_launch_event(launch_row)
@@ -719,6 +750,7 @@ if not launches_df.empty:
 if not recent_launches_df.empty:
     for _, launch_row in recent_launches_df.iterrows():
         save_launch_event(launch_row)
+
 failed_launches_df = pd.DataFrame()
 sensitive_launches_df = pd.DataFrame()
 
@@ -970,33 +1002,3 @@ st.caption(
     f"Loaded {len(filtered_upcoming_df):,} upcoming launches, {len(filtered_failed_df):,} recent failures, and "
     f"{len(filtered_sensitive_df):,} sensitive launch profiles under the current filters."
 )
-
-
-from utils.event_logger import log_event
-
-def save_launch_event(launch):
-    mission_name = safe_text(launch.get("name")) or "unknown-launch"
-    launch_time = launch.get("net")
-    country = safe_text(launch.get("country_code")) or "Unknown"
-    subcategory = safe_text(launch.get("mission_type")) or "orbital_launch"
-    provider = safe_text(launch.get("provider")) or "Unknown"
-
-    if pd.isna(launch_time):
-        return
-
-    if hasattr(launch_time, "isoformat"):
-        launch_time = launch_time.isoformat()
-
-    event_id = f"launch_{mission_name}_{launch_time}"
-
-    log_event(
-        {
-            "event_id": event_id,
-            "timestamp": launch_time,
-            "country": country,
-            "event_type": "launch",
-            "subcategory": subcategory,
-            "source": provider,
-            "sensitive": looks_sensitive(launch),
-        }
-    )
