@@ -98,4 +98,4 @@ with tab1:
             y="launches",
             title="Launch Activity by Country"
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=T
