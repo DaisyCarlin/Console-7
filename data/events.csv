@@ -1,11 +1,1 @@
 event_id,timestamp,country,event_type,subcategory,source,sensitive
-mil-flight-raf-001,2026-03-25T14:32:00Z,United Kingdom,military_flight,RAF transport movement,OpenSky,true
-launch-ussf-001,2026-03-25T15:10:00Z,United States,launch,National security launch,Launch Library 2,true
-emergency-flight-7700-001,2026-03-24T09:15:00Z,Poland,emergency_flight,7700 general emergency,OpenSky,true
-sat-cn-001,2026-02-18T12:05:00Z,China,satellite,military reconnaissance,SpaceTrack,true
-launch-fr-001,2026-02-10T08:00:00Z,France,launch,orbital launch,Launch Library 2,false
-mil-flight-usaf-002,2026-03-23T18:20:00Z,United States,military_flight,USAF tanker movement,ADS-B,true
-emergency-flight-7600-002,2026-03-21T11:40:00Z,Germany,emergency_flight,7600 radio failure,OpenSky,true
-sat-us-002,2026-03-22T06:00:00Z,United States,satellite,government payload,SpaceTrack,true
-launch-india-003,2026-03-20T04:55:00Z,India,launch,polar launch,Launch Library 2,false
-mil-flight-fr-004,2026-03-19T14:12:00Z,France,military_flight,naval aviation patrol,ADS-B,true
