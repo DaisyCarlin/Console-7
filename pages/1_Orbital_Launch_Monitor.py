@@ -8,6 +8,7 @@ import streamlit as st
 from folium.features import DivIcon
 from folium.plugins import Fullscreen, MousePosition
 from streamlit_folium import st_folium
+from utils.event_logger import log_event
 
 st.set_page_config(page_title="Orbital Launch Monitor", layout="wide")
 
@@ -711,7 +712,13 @@ try:
 except Exception as error:
     recent_launches_df = pd.DataFrame()
     recent_launch_error = str(error)
+if not launches_df.empty:
+    for _, launch_row in launches_df.iterrows():
+        save_launch_event(launch_row)
 
+if not recent_launches_df.empty:
+    for _, launch_row in recent_launches_df.iterrows():
+        save_launch_event(launch_row)
 failed_launches_df = pd.DataFrame()
 sensitive_launches_df = pd.DataFrame()
 
@@ -968,10 +975,17 @@ st.caption(
 from utils.event_logger import log_event
 
 def save_launch_event(launch):
-    mission_name = str(launch.get("name", "")).strip() or "unknown-launch"
-    country = str(launch.get("country", "")).strip() or "Unknown"
-    launch_time = launch.get("window_start") or launch.get("net")
-    subcategory = "orbital_launch"
+    mission_name = safe_text(launch.get("name")) or "unknown-launch"
+    launch_time = launch.get("net")
+    country = safe_text(launch.get("country_code")) or "Unknown"
+    subcategory = safe_text(launch.get("mission_type")) or "orbital_launch"
+    provider = safe_text(launch.get("provider")) or "Unknown"
+
+    if pd.isna(launch_time):
+        return
+
+    if hasattr(launch_time, "isoformat"):
+        launch_time = launch_time.isoformat()
 
     event_id = f"launch_{mission_name}_{launch_time}"
 
@@ -982,8 +996,7 @@ def save_launch_event(launch):
             "country": country,
             "event_type": "launch",
             "subcategory": subcategory,
-            "source": "launch_feed",
-            "sensitive": False,
+            "source": provider,
+            "sensitive": looks_sensitive(launch),
         }
     )
-            
