@@ -5,4 +5,5 @@ plotly
 folium
 streamlit-folium
 websocket-client
+sgp4
 
